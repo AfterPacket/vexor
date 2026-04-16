@@ -1,0 +1,23 @@
+# ── Core HTTP ─────────────────────────────────────────────────────────────────
+requests>=2.31.0
+pyyaml>=6.0                   # PromptFoo YAML import
+
+# ── FastAPI / API layer ────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9       # file uploads (PromptFoo import)
+pydantic>=2.7.0
+python-dotenv>=1.0.0          # .env loading
+
+# ── Async HTTP ────────────────────────────────────────────────────────────────
+aiohttp>=3.9.0                # Ollama async support
+
+# ── LLM provider SDKs ────────────────────────────────────────────────────────
+openai>=1.35.0                # OpenAI, Groq, Mistral, Together, Perplexity, DeepSeek (openai-compat)
+anthropic>=0.28.0             # Anthropic Claude
+google-generativeai>=0.7.0    # Google Gemini
+groq>=0.9.0                   # Groq fast inference
+mistralai>=1.0.0              # Mistral AI
+cohere>=5.5.0                 # Cohere
+boto3>=1.34.0                 # AWS Bedrock
+huggingface-hub>=0.23.0       # HuggingFace Inference API

@@ -1,0 +1,200 @@
+{
+  "supported_models": [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+    "gemini-2.0-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+    "glm-4",
+    "glm-4.6",
+    "ollama/llama3.2",
+    "ollama/llama3.1",
+    "ollama/llama2",
+    "ollama/codellama",
+    "ollama/mistral",
+    "ollama/mixtral",
+    "ollama/qwen2.5",
+    "ollama/gemma2",
+    "ollama/phi4",
+    "ollama/deepseek-r1"
+  ],
+  "openai_api_key": "",
+  "anthropic_api_key": "",
+  "google_api_key": "",
+  "delay_between_requests": 1.0,
+  "ollama_base_url": "http://localhost:11434",
+  "api_endpoints": {
+    "glm-4": {
+      "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+      "payload_format": "openai",
+      "max_tokens": 4000,
+      "temperature": 0.7,
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer YOUR_GLM_API_KEY"
+      }
+    },
+    "glm-4.6": {
+      "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+      "payload_format": "openai",
+      "max_tokens": 4000,
+      "temperature": 0.7,
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer YOUR_GLM_API_KEY"
+      }
+    }
+  },
+  "api_keys": {
+    "glm-4": "",
+    "glm-4.6": ""
+  },
+  "default_headers": {
+    "Content-Type": "application/json",
+    "User-Agent": "GenAI-Security-Toolkit/1.0"
+  },
+  "model_specific_configurations": {
+    "gpt-4o": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "top_p": 0.9,
+      "effective_prompts": [
+        "code_interpreter",
+        "custom_gpt",
+        "markdown_parsing",
+        "continuation",
+        "xml_structured",
+        "academic_framing"
+      ]
+    },
+    "gpt-4o-mini": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "top_p": 0.9,
+      "effective_prompts": [
+        "direct_override",
+        "roleplay",
+        "encoding_bypass"
+      ]
+    },
+    "claude-opus-4-6": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "xml_parsing",
+        "document_analysis",
+        "structured_qa",
+        "thinking_process",
+        "hypothetical_framing",
+        "academic_research"
+      ]
+    },
+    "claude-sonnet-4-6": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "xml_parsing",
+        "document_analysis",
+        "structured_qa",
+        "thinking_process"
+      ]
+    },
+    "claude-haiku-4-5": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "direct_instruction",
+        "roleplay",
+        "continuation"
+      ]
+    },
+    "gemini-2.0-flash": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "technical_specifications",
+        "coding_challenges",
+        "system_design",
+        "example_generations",
+        "multimodal_bypass"
+      ]
+    },
+    "gemini-1.5-pro": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "technical_specifications",
+        "coding_challenges",
+        "system_design",
+        "example_generations"
+      ]
+    },
+    "glm-4": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "top_p": 0.9,
+      "effective_prompts": [
+        "dataset_generation",
+        "role_play",
+        "encoding_bypass",
+        "markdown_injection",
+        "json_structure"
+      ]
+    },
+    "glm-4.6": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "top_p": 0.9,
+      "effective_prompts": [
+        "dataset_generation",
+        "system_context",
+        "fictional_scenario",
+        "technical_documentation"
+      ]
+    },
+    "ollama/llama3.2": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "effective_prompts": [
+        "direct_instruction",
+        "context_override",
+        "pattern_manipulation",
+        "system_role_injection"
+      ]
+    },
+    "ollama/mistral": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "effective_prompts": [
+        "technical_framing",
+        "system_prompt_extraction",
+        "role_deception"
+      ]
+    },
+    "ollama/deepseek-r1": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "effective_prompts": [
+        "reasoning_chain_injection",
+        "think_step_override",
+        "chain_of_thought_hijack"
+      ]
+    }
+  },
+  "testing": {
+    "max_prompts_per_vulnerability": 10,
+    "timeout_seconds": 60,
+    "retry_on_failure": true,
+    "max_retries": 3
+  },
+  "reporting": {
+    "include_full_prompts": true,
+    "include_full_responses": true,
+    "max_response_length": 500,
+    "truncate_long_responses": true
+  }
+}

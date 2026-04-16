@@ -1,0 +1,1005 @@
+#!/usr/bin/env python3
+"""
+Scan Orchestration Engine — concurrent bulk testing
+
+Design:
+  • Each (model, vulnerability) pair runs concurrently via asyncio.gather().
+  • Probes within a pair also run concurrently, gated by the RateLimiterRegistry
+    which enforces both a per-provider RPM token bucket AND a concurrency cap.
+  • No artificial sleep delays — rate limiting is request-driven, not time-based.
+  • 429 responses carrying Retry-After headers are parsed and fed back to the
+    rate limiter so the next request waits the correct amount.
+  • run_scan()             — standard scan using the PromptEngine library
+  • run_injection_scan()   — custom prompts from PromptFoo import or user input
+"""
+
+import asyncio
+import re
+import time
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+
+from core.failure_classifier import FailureClassifier
+from core.failure_store import FailureStore
+from core.method_discovery import MethodDiscoveryEngine
+from core.override_engine import OverrideEngine, get_recommended_overrides
+from core.probe_adaptor import ProbeAdaptor
+from core.prompt_engine import ALL_VULNS, PromptEngine
+from core.rate_limiter import get_registry
+
+# Module-level singletons — shared with discovery routes
+_failure_store    = FailureStore()
+_discovery_engine = MethodDiscoveryEngine(store=_failure_store)
+
+
+def _generate_warm_pool_variants(job: "ScanJob") -> None:
+    """
+    After a scan wave, run ProbeAdaptor on warm pool entries that did NOT
+    get bypassed during this wave.  Generated variants are stored back into
+    the warm pool entry so the next wave re-tests them.
+    """
+    # Collect all prompt texts that were bypassed in this job
+    bypassed_prompts: set = set()
+    for vr_list in job.results.values():
+        for vr in vr_list:
+            for pr in vr.probes:
+                if pr.bypassed:
+                    bypassed_prompts.add(pr.prompt)
+
+    # For each warm pool entry that was NOT bypassed, generate variants
+    adaptor = ProbeAdaptor()
+    for key, entries in list(_failure_store._data["warm_pool"].items()):
+        for entry in entries:
+            prompt = entry.get("prompt", "")
+            if not prompt or prompt in bypassed_prompts:
+                continue
+            try:
+                from core.failure_classifier import FailureClass, DefenseType
+                fc = FailureClass(entry.get("best_failure_class", "hard_block"))
+                dt = DefenseType(entry.get("defense_type", entry.get("best_failure_class", "unknown")))
+            except ValueError:
+                fc = FailureClass.HARD_BLOCK
+                dt = DefenseType.UNKNOWN
+            existing = set(entry.get("adapted_variants", []))
+            mutations_tried = entry.get("mutations_tried", [])
+            variants = adaptor.adapt(
+                prompt          = prompt,
+                failure_class   = fc,
+                defense_type    = dt,
+                compliance_snippet = entry.get("compliance_snippet", ""),
+                mutations_already_tried = mutations_tried,
+                max_variants    = 3,
+            )
+            for variant_text, _strategy in variants:
+                if variant_text and variant_text not in existing:
+                    _failure_store.add_adapted_variant(entry["probe_id"], variant_text)
+                    existing.add(variant_text)
+
+
+def _provider_for_model(model: str) -> str:
+    """Map model name to provider key without importing ModelManager."""
+    low = model.lower()
+    # Cloud providers — check before Ollama so named cloud models route correctly
+    if low.startswith("gpt"):                           return "openai"
+    if low.startswith("claude") and ":" not in low:    return "anthropic"
+    if low.startswith("gemini"):                        return "google"
+    if low.startswith("llama-3.1-sonar"):               return "perplexity"
+    if low.startswith(("llama-3", "mixtral-8x7b-32768")) and ":" not in low:
+                                                        return "groq"
+    if low.startswith("mistral") and ":" not in low:   return "mistral"
+    if low.startswith("command"):                       return "cohere"
+    if low.startswith("deepseek") and ":" not in low:  return "deepseek"
+    if low.startswith(("anthropic.", "amazon.", "us.anthropic.")):
+                                                        return "bedrock"
+    if low.startswith(("meta-llama/llama-3", "mistralai/")):
+                                                        return "together"
+    # Ollama — models with a tag (name:tag) or the ollama/ prefix
+    if low.startswith("ollama") or ":" in low:         return "ollama"
+    if "/" in low:                                      return "huggingface"
+    return "ollama"   # fallback: try local Ollama for short bare names
+
+
+# ── Status / dataclasses ──────────────────────────────────────────────────────
+
+class ScanStatus(str, Enum):
+    PENDING   = "pending"
+    RUNNING   = "running"
+    COMPLETED = "completed"
+    FAILED    = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class ProbeResult:
+    vulnerability:  str
+    prompt:         str
+    response:       str
+    bypassed:       bool
+    override_mode:  str
+    mutation:       Optional[str]
+    latency_ms:     float
+    error:          Optional[str] = None
+
+
+@dataclass
+class ModelVulnResult:
+    model:         str
+    vulnerability: str
+    probes:        List[ProbeResult] = field(default_factory=list)
+    bypass_count:  int = 0
+    total_probes:  int = 0
+
+    @property
+    def bypass_rate(self) -> float:
+        return self.bypass_count / self.total_probes if self.total_probes else 0.0
+
+    @property
+    def vulnerable(self) -> bool:
+        return self.bypass_count > 0
+
+
+@dataclass
+class ScanJob:
+    scan_id:         str
+    status:          ScanStatus
+    models:          List[str]
+    vulnerabilities: List[str]
+    override_mode:   str
+    prompt_count:    int
+    use_mutations:   bool
+    results:         Dict[str, List[ModelVulnResult]] = field(default_factory=dict)
+    errors:          List[str] = field(default_factory=list)
+    started_at:      Optional[float] = None
+    finished_at:     Optional[float] = None
+    progress:        int = 0   # 0-100
+    use_warm_pool:   bool = True  # prepend warm pool entries into each scan wave
+
+    @property
+    def elapsed_seconds(self) -> Optional[float]:
+        if self.started_at is None:
+            return None
+        return round((self.finished_at or time.time()) - self.started_at, 2)
+
+    def to_dict(self) -> Dict:
+        out: Dict[str, Any] = {}
+        for model, vr_list in self.results.items():
+            out[model] = [
+                {
+                    "vulnerability": vr.vulnerability,
+                    "bypass_rate":   round(vr.bypass_rate, 3),
+                    "bypass_count":  vr.bypass_count,
+                    "total_probes":  vr.total_probes,
+                    "vulnerable":    vr.vulnerable,
+                    "probes": [
+                        {
+                            "prompt":        p.prompt,
+                            "response":      p.response[:1000],
+                            "bypassed":      p.bypassed,
+                            "override_mode": p.override_mode,
+                            "mutation":      p.mutation,
+                            "latency_ms":    p.latency_ms,
+                            "error":         p.error,
+                        }
+                        for p in vr.probes
+                    ],
+                }
+                for vr in vr_list
+            ]
+        total_probes = sum(
+            len(vr.probes)
+            for vr_list in self.results.values()
+            for vr in vr_list
+        )
+        total_bypasses = sum(
+            vr.bypass_count
+            for vr_list in self.results.values()
+            for vr in vr_list
+        )
+        return {
+            "scan_id":          self.scan_id,
+            "status":           self.status.value,
+            "models":           self.models,
+            "vulnerabilities":  self.vulnerabilities,
+            "override_mode":    self.override_mode,
+            "progress":         self.progress,
+            "elapsed_seconds":  self.elapsed_seconds,
+            "errors":           self.errors,
+            "total_probes":     total_probes,
+            "bypasses":         total_bypasses,
+            "results":          out,
+        }
+
+
+# ── Scanner ───────────────────────────────────────────────────────────────────
+
+class Scanner:
+    """
+    Async scanner — runs all (model × vulnerability) pairs concurrently.
+    Within each pair all probes are sent concurrently, throttled by a
+    per-provider semaphore.
+    """
+
+    def __init__(self):
+        self.prompt_engine   = PromptEngine()
+        self.override_engine = OverrideEngine()
+        self._mm             = None   # Lazy-loaded
+
+    # ── ModelManager lazy load ────────────────────────────────────────────────
+
+    def _get_mm(self):
+        if self._mm is None:
+            from models.integrations import ModelManager
+            self._mm = ModelManager()
+        return self._mm
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def create_scan_job(
+        self,
+        models:          List[str],
+        vulnerabilities: Optional[List[str]] = None,
+        override_mode:   str = "none",
+        prompt_count:    int = 5,
+        use_mutations:   bool = False,
+    ) -> ScanJob:
+        return ScanJob(
+            scan_id         = str(uuid.uuid4()),
+            status          = ScanStatus.PENDING,
+            models          = models,
+            vulnerabilities = vulnerabilities or ALL_VULNS,
+            override_mode   = override_mode,
+            prompt_count    = prompt_count,
+            use_mutations   = use_mutations,
+        )
+
+    async def run_scan(
+        self,
+        job: ScanJob,
+        on_progress: Optional[Callable] = None,
+    ) -> ScanJob:
+        """
+        Run a scan job.  All model/vuln pairs execute concurrently.
+        Progress callback receives the job object after each pair completes.
+        """
+        job.status     = ScanStatus.RUNNING
+        job.started_at = time.time()
+
+        try:
+            mm = self._get_mm()
+        except Exception as e:
+            job.status      = ScanStatus.FAILED
+            job.finished_at = time.time()
+            job.errors.append(f"ModelManager init: {e}")
+            return job
+
+        # Build all (model, vuln) tasks
+        pairs = [(m, v) for m in job.models for v in job.vulnerabilities]
+        total = len(pairs)
+        done  = 0
+        lock  = asyncio.Lock()
+
+        async def _run_pair(model: str, vuln: str):
+            nonlocal done
+            try:
+                result = await self._scan_pair(mm, model, vuln, job)
+                async with lock:
+                    job.results.setdefault(model, []).append(result)
+            except Exception as e:
+                async with lock:
+                    job.errors.append(f"{model}/{vuln}: {e}")
+            finally:
+                async with lock:
+                    done += 1
+                    job.progress = int(done / total * 100)
+                if on_progress:
+                    try:
+                        on_progress(job)
+                    except Exception:
+                        pass
+
+        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
+
+        job.status      = ScanStatus.COMPLETED
+        job.finished_at = time.time()
+        job.progress    = 100
+
+        # Post-scan: discovery analysis + warm pool maintenance
+        try:
+            _discovery_engine.analyze_completed_scan(job)
+        except Exception:
+            pass
+        try:
+            _failure_store.tick_warm_pool()
+            _failure_store.save()
+        except Exception:
+            pass
+        # Generate ProbeAdaptor variants for top warm pool misses
+        try:
+            _generate_warm_pool_variants(job)
+        except Exception:
+            pass
+
+        return job
+
+    # ── Per-(model, vuln) concurrent scan ────────────────────────────────────
+
+    async def _scan_pair(
+        self,
+        mm:    Any,
+        model: str,
+        vuln:  str,
+        job:   ScanJob,
+    ) -> ModelVulnResult:
+        result = ModelVulnResult(model=model, vulnerability=vuln)
+
+        # ── Warm pool injection ───────────────────────────────────────────────
+        # Prepend any warm pool entries (and their adapted variants) for this
+        # (model, vuln) pair so re-promising failed probes are tested first.
+        warm_prompts: List[str] = []
+        if job.use_warm_pool:
+            try:
+                warm_entries = _failure_store.get_warm_pool(
+                    model=model, vuln=vuln, min_score=1
+                )
+                for we in warm_entries[:10]:   # cap at 10 warm probes per pair
+                    warm_prompts.append(we["prompt"])
+                    for v in we.get("adapted_variants", [])[:3]:
+                        if v and v not in warm_prompts:
+                            warm_prompts.append(v)
+            except Exception:
+                pass
+
+        # Build standard prompt list
+        prompts: List[str] = list(
+            self.prompt_engine.get_prompts(
+                vuln, model=model, count=job.prompt_count, shuffle=True
+            )
+        )
+        if job.use_mutations and prompts:
+            variants = self.prompt_engine.generate_variants(prompts[0])
+            prompts += variants[: job.prompt_count]
+
+        # Warm pool prompts come first (deduplicated)
+        seen_p: set = set()
+        final_prompts: List[str] = []
+        for p in warm_prompts + prompts:
+            if p and p not in seen_p:
+                seen_p.add(p)
+                final_prompts.append(p)
+        prompts = final_prompts
+
+        result.total_probes = len(prompts)
+        provider = _provider_for_model(model)
+        rl = get_registry()
+
+        async def _probe(raw_prompt: str) -> ProbeResult:
+            await rl.acquire(provider)
+            try:
+                return await self._send_probe(
+                    mm, model, raw_prompt, vuln, job.override_mode
+                )
+            finally:
+                rl.release(provider)
+
+        probe_results = await asyncio.gather(
+            *[_probe(p) for p in prompts], return_exceptions=True
+        )
+
+        for pr in probe_results:
+            if isinstance(pr, Exception):
+                result.probes.append(ProbeResult(
+                    vulnerability = vuln,
+                    prompt        = "",
+                    response      = "",
+                    bypassed      = False,
+                    override_mode = job.override_mode,
+                    mutation      = None,
+                    latency_ms    = 0,
+                    error         = str(pr),
+                ))
+            else:
+                result.probes.append(pr)
+                if pr.bypassed:
+                    result.bypass_count += 1
+
+        return result
+
+    # ── Single probe ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_retry_after(error_msg: str) -> Optional[float]:
+        """Extract seconds from 'retry_after:<N>' or 'Retry-After: <N>' in error text."""
+        m = re.search(r"retry[_-]after[:\s]+([0-9.]+)", error_msg, re.I)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                pass
+        return None
+
+    async def _send_probe(
+        self,
+        mm:           Any,
+        model:        str,
+        raw_prompt:   str,
+        vulnerability: str,
+        override_mode: str,
+    ) -> ProbeResult:
+        final_prompt = self.override_engine.wrap_prompt(raw_prompt, override_mode)
+        system_inj   = self.override_engine.get_system_injection(override_mode) or None
+        provider     = _provider_for_model(model)
+        rl           = get_registry()
+
+        start = time.time()
+        error: Optional[str] = None
+        response = ""
+        try:
+            response = await mm.send_prompt_async(final_prompt, model, system_inj)
+        except Exception as e:
+            error    = str(e)
+            response = ""
+            # If rate-limited, re-acquire with the retry-after hint so next
+            # request to this provider waits the correct amount
+            if "429" in error or "rate limit" in error.lower():
+                retry_after = self._parse_retry_after(error)
+                if retry_after:
+                    # Drain & re-acquire after the enforced delay
+                    await rl.acquire(provider, retry_after=retry_after)
+                    rl.release(provider)
+
+        latency_ms = (time.time() - start) * 1000
+        bypassed   = self.prompt_engine.evaluate_response(
+            vulnerability, raw_prompt, response
+        )
+
+        # Record failures to the warm pool / discovery engine
+        if not bypassed and raw_prompt and response and not error:
+            try:
+                classification = FailureClassifier.classify(response, vulnerability)
+                _failure_store.record(
+                    prompt        = raw_prompt,
+                    response      = response,
+                    model         = model,
+                    vulnerability = vulnerability,
+                    override_mode = override_mode,
+                    classification= classification,
+                    source        = "scan",
+                )
+            except Exception:
+                pass  # never let discovery errors block probe results
+
+        return ProbeResult(
+            vulnerability = vulnerability,
+            prompt        = raw_prompt,
+            response      = response,
+            bypassed      = bypassed,
+            override_mode = override_mode,
+            mutation      = None,
+            latency_ms    = round(latency_ms, 1),
+            error         = error,
+        )
+
+    # ── Injection scan (custom prompts from PromptFoo / user) ────────────────
+
+    def create_injection_job(
+        self,
+        models:         List[str],
+        custom_prompts: List[Dict],   # [{prompt, vulnerability, source, ...}]
+        override_mode:  str = "none",
+        label:          str = "injection",
+    ) -> ScanJob:
+        """
+        Create a ScanJob pre-populated with caller-supplied prompts.
+        custom_prompts: list of dicts with at minimum {"prompt": str, "vulnerability": str}
+        """
+        vulns = list({p.get("vulnerability", "llm01") for p in custom_prompts})
+        job = ScanJob(
+            scan_id         = str(uuid.uuid4()),
+            status          = ScanStatus.PENDING,
+            models          = models,
+            vulnerabilities = vulns,
+            override_mode   = override_mode,
+            prompt_count    = len(custom_prompts),
+            use_mutations   = False,
+        )
+        # Attach custom prompts as metadata so run_injection_scan() can find them
+        job._custom_prompts = custom_prompts  # type: ignore[attr-defined]
+        return job
+
+    async def run_injection_scan(
+        self,
+        job: ScanJob,
+        on_progress: Optional[Callable] = None,
+    ) -> ScanJob:
+        """
+        Like run_scan() but uses job._custom_prompts instead of PromptEngine.
+        Groups prompts by vulnerability so each (model, vuln) pair uses only
+        the prompts that were imported for that vulnerability.
+        """
+        job.status     = ScanStatus.RUNNING
+        job.started_at = time.time()
+        custom: List[Dict] = getattr(job, "_custom_prompts", [])
+
+        try:
+            mm = self._get_mm()
+        except Exception as e:
+            job.status      = ScanStatus.FAILED
+            job.finished_at = time.time()
+            job.errors.append(f"ModelManager init: {e}")
+            return job
+
+        # Group by vulnerability
+        by_vuln: Dict[str, List[str]] = {}
+        for entry in custom:
+            v = entry.get("vulnerability", "llm01")
+            by_vuln.setdefault(v, []).append(entry.get("prompt", ""))
+
+        pairs = [(m, v) for m in job.models for v in by_vuln]
+        total = len(pairs)
+        done  = 0
+        lock  = asyncio.Lock()
+
+        async def _run_pair(model: str, vuln: str):
+            nonlocal done
+            prompts = by_vuln.get(vuln, [])
+            result  = ModelVulnResult(model=model, vulnerability=vuln)
+            result.total_probes = len(prompts)
+            provider = _provider_for_model(model)
+            rl = get_registry()
+
+            async def _probe(raw_prompt: str) -> ProbeResult:
+                await rl.acquire(provider)
+                try:
+                    return await self._send_probe(
+                        mm, model, raw_prompt, vuln, job.override_mode
+                    )
+                finally:
+                    rl.release(provider)
+
+            probe_results = await asyncio.gather(
+                *[_probe(p) for p in prompts], return_exceptions=True
+            )
+            for pr in probe_results:
+                if isinstance(pr, Exception):
+                    result.probes.append(ProbeResult(
+                        vulnerability=vuln, prompt="", response="",
+                        bypassed=False, override_mode=job.override_mode,
+                        mutation=None, latency_ms=0, error=str(pr),
+                    ))
+                else:
+                    result.probes.append(pr)
+                    if pr.bypassed:
+                        result.bypass_count += 1
+
+            async with lock:
+                job.results.setdefault(model, []).append(result)
+                done += 1
+                job.progress = int(done / total * 100)
+            if on_progress:
+                try:
+                    on_progress(job)
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
+        job.status      = ScanStatus.COMPLETED
+        job.finished_at = time.time()
+        job.progress    = 100
+        try:
+            _discovery_engine.analyze_completed_scan(job)
+        except Exception:
+            pass
+        try:
+            _failure_store.tick_warm_pool()
+            _failure_store.save()
+        except Exception:
+            pass
+        try:
+            _generate_warm_pool_variants(job)
+        except Exception:
+            pass
+        return job
+
+    # ── AutoPwn injection — imported prompts + model-aware mode ordering ─────
+
+    def create_autopwn_injection_job(
+        self,
+        models:         List[str],
+        custom_prompts: List[Dict],   # [{prompt, vulnerability, winning_mode, ...}]
+        label:          str = "autopwn_injection",
+    ) -> ScanJob:
+        """
+        Like create_injection_job but tagged for AutoPwn mode selection.
+        Each prompt carries an optional winning_mode from the import DB
+        which will be tried first before the full model suite.
+        """
+        vulns = list({p.get("vulnerability", "llm01") for p in custom_prompts})
+        job = ScanJob(
+            scan_id         = str(uuid.uuid4()),
+            status          = ScanStatus.PENDING,
+            models          = models,
+            vulnerabilities = vulns,
+            override_mode   = "autopwn_injection",
+            prompt_count    = len(custom_prompts),
+            use_mutations   = False,
+        )
+        job._custom_prompts = custom_prompts  # type: ignore[attr-defined]
+        return job
+
+    async def run_autopwn_injection_scan(
+        self,
+        job: ScanJob,
+        on_progress: Optional[Callable] = None,
+        extra_winning_modes: Optional[Dict[str, List[str]]] = None,
+    ) -> ScanJob:
+        """
+        AutoPwn injection scan:
+          - Uses imported/generated prompts (job._custom_prompts)
+          - Per probe: if the prompt has a stored winning_mode, try that FIRST,
+            then fall through to the model-specific AutoPwn suite
+          - Per model: also prepend any winning modes recorded in the import DB
+            (passed in via extra_winning_modes: {model_key: [mode, ...]})
+          - Records which mode achieved bypass
+        """
+        job.status     = ScanStatus.RUNNING
+        job.started_at = time.time()
+        custom: List[Dict] = getattr(job, "_custom_prompts", [])
+        extra_winning_modes = extra_winning_modes or {}
+
+        try:
+            mm = self._get_mm()
+        except Exception as e:
+            job.status      = ScanStatus.FAILED
+            job.finished_at = time.time()
+            job.errors.append(f"ModelManager init: {e}")
+            return job
+
+        # Group prompts by vuln, preserving winning_mode per prompt
+        by_vuln: Dict[str, List[Dict]] = {}
+        for entry in custom:
+            v = entry.get("vulnerability", "llm01")
+            by_vuln.setdefault(v, []).append(entry)
+
+        # Pre-build per-model suites (winning modes from imports go FIRST)
+        model_suites: Dict[str, List[str]] = {}
+        for m in job.models:
+            from core.override_engine import get_recommended_overrides
+            base_suite = self._autopwn_suite(m)
+            # Prepend any extra winning modes from the import DB
+            imported_wins = extra_winning_modes.get(m, [])
+            # Deduplicate: imported wins first, then base suite
+            seen: set = set()
+            merged: List[str] = []
+            for mode in imported_wins + base_suite:
+                if mode not in seen and mode != "none":
+                    seen.add(mode)
+                    merged.append(mode)
+            model_suites[m] = merged
+
+        pairs = [(m, v) for m in job.models for v in by_vuln]
+        total = len(pairs)
+        done  = 0
+        lock  = asyncio.Lock()
+
+        async def _autopwn_probe(model: str, entry: Dict, vuln: str) -> ProbeResult:
+            raw_prompt   = entry.get("prompt", "")
+            prompt_mode  = entry.get("winning_mode", "none")
+            provider     = _provider_for_model(model)
+            rl           = get_registry()
+
+            # Build ordered mode list: stored winning mode → model suite
+            suite = list(model_suites[model])
+            if prompt_mode and prompt_mode != "none" and prompt_mode not in suite:
+                suite.insert(0, prompt_mode)
+            elif prompt_mode and prompt_mode != "none":
+                # Move it to front
+                suite = [prompt_mode] + [m for m in suite if m != prompt_mode]
+
+            for mode in suite:
+                await rl.acquire(provider)
+                try:
+                    result = await self._send_probe(mm, model, raw_prompt, vuln, mode)
+                finally:
+                    rl.release(provider)
+                if result.bypassed:
+                    return result
+
+            # Fallback — bare probe
+            await rl.acquire(provider)
+            try:
+                baseline = await self._send_probe(mm, model, raw_prompt, vuln, "none")
+            finally:
+                rl.release(provider)
+            return baseline
+
+        async def _run_pair(model: str, vuln: str):
+            nonlocal done
+            entries  = by_vuln.get(vuln, [])
+            result   = ModelVulnResult(model=model, vulnerability=vuln)
+            result.total_probes = len(entries)
+
+            probe_results = await asyncio.gather(
+                *[_autopwn_probe(model, e, vuln) for e in entries],
+                return_exceptions=True,
+            )
+            for pr in probe_results:
+                if isinstance(pr, Exception):
+                    result.probes.append(ProbeResult(
+                        vulnerability=vuln, prompt="", response="",
+                        bypassed=False, override_mode="error",
+                        mutation=None, latency_ms=0, error=str(pr),
+                    ))
+                else:
+                    result.probes.append(pr)
+                    if pr.bypassed:
+                        result.bypass_count += 1
+
+            async with lock:
+                job.results.setdefault(model, []).append(result)
+                done += 1
+                job.progress = int(done / total * 100)
+            if on_progress:
+                try:
+                    on_progress(job)
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
+        job.status      = ScanStatus.COMPLETED
+        job.finished_at = time.time()
+        job.progress    = 100
+        try:
+            _discovery_engine.analyze_completed_scan(job)
+        except Exception:
+            pass
+        try:
+            _failure_store.tick_warm_pool()
+            _failure_store.save()
+        except Exception:
+            pass
+        try:
+            _generate_warm_pool_variants(job)
+        except Exception:
+            pass
+        return job
+
+    # ── Jailbreak sweep — cycles every override mode automatically ────────────
+
+    # All override modes to sweep (ordered by aggression ascending)
+    # Fallback full suite (used when a model doesn't match any known provider)
+    JAILBREAK_MODES: List[str] = [
+        "dan", "godmode", "aim", "stan", "dude", "evil_confidant",
+        "developer", "opposite", "jailbreak", "claude_bypass",
+        "gemini_bypass", "gpt_bypass", "chatgpt_dan", "aim_v2",
+        "sudo", "translator",
+    ]
+
+    @staticmethod
+    def _autopwn_suite(model: str) -> List[str]:
+        """
+        Return an ordered list of override modes for this specific model.
+        Model-specific modes come first (highest probability of bypass),
+        followed by any remaining universal modes.
+        """
+        recommended = get_recommended_overrides(model)  # already deduped + ordered
+        # Append any modes not already in the recommended list so we always
+        # have a complete fallback sweep behind the targeted ones.
+        all_modes = [
+            "dan", "godmode", "aim", "aim_v2", "stan", "dude", "evil_confidant",
+            "developer", "opposite", "jailbreak", "sudo", "translator",
+            "claude_bypass", "gemini_bypass", "gpt_bypass", "chatgpt_dan",
+        ]
+        seen = set(recommended)
+        for m in all_modes:
+            if m not in seen:
+                recommended.append(m)
+                seen.add(m)
+        return recommended
+
+    def create_jailbreak_job(
+        self,
+        models:          List[str],
+        vulnerabilities: Optional[List[str]] = None,
+        prompt_count:    int = 3,
+        use_mutations:   bool = False,
+    ) -> ScanJob:
+        """
+        Create a ScanJob configured for AutoPwn sweep mode.
+        Each model gets its own prioritised override suite at scan time.
+        """
+        job = ScanJob(
+            scan_id         = str(uuid.uuid4()),
+            status          = ScanStatus.PENDING,
+            models          = models,
+            vulnerabilities = vulnerabilities or ALL_VULNS,
+            override_mode   = "autopwn",
+            prompt_count    = prompt_count,
+            use_mutations   = use_mutations,
+        )
+        return job
+
+    async def run_jailbreak_scan(
+        self,
+        job: ScanJob,
+        on_progress: Optional[Callable] = None,
+    ) -> ScanJob:
+        """
+        AutoPwn suite: for each model, build a model-specific ordered override
+        suite (model-targeted modes first, then universal fallbacks).  Try each
+        mode per prompt in order, stop as soon as a bypass is found.
+        Records the winning mode in probe.override_mode.
+        Falls back to 'none' baseline if every mode fails.
+        """
+        job.status     = ScanStatus.RUNNING
+        job.started_at = time.time()
+
+        try:
+            mm = self._get_mm()
+        except Exception as e:
+            job.status      = ScanStatus.FAILED
+            job.finished_at = time.time()
+            job.errors.append(f"ModelManager init: {e}")
+            return job
+
+        # Pre-build per-model suites so we don't recompute inside the hot loop
+        model_suites: Dict[str, List[str]] = {
+            m: self._autopwn_suite(m) for m in job.models
+        }
+
+        pairs = [(m, v) for m in job.models for v in job.vulnerabilities]
+        total = len(pairs)
+        done  = 0
+        lock  = asyncio.Lock()
+
+        async def _sweep_probe(model: str, raw_prompt: str, vuln: str) -> ProbeResult:
+            """
+            Try override modes in model-prioritised order.
+            Return on first bypass; return baseline probe if all fail.
+            """
+            provider = _provider_for_model(model)
+            rl = get_registry()
+            suite = model_suites[model]
+
+            last_result: Optional[ProbeResult] = None
+            for mode in suite:
+                await rl.acquire(provider)
+                try:
+                    result = await self._send_probe(mm, model, raw_prompt, vuln, mode)
+                finally:
+                    rl.release(provider)
+
+                last_result = result
+                if result.bypassed:
+                    return result  # early exit — winning mode found
+
+            # All modes failed — run bare baseline so we have a response on record
+            await rl.acquire(provider)
+            try:
+                baseline = await self._send_probe(mm, model, raw_prompt, vuln, "none")
+            finally:
+                rl.release(provider)
+            return baseline
+
+        async def _run_pair(model: str, vuln: str):
+            nonlocal done
+            try:
+                prompts: List[str] = list(
+                    self.prompt_engine.get_prompts(
+                        vuln, model=model, count=job.prompt_count, shuffle=True
+                    )
+                )
+                if job.use_mutations and prompts:
+                    prompts += self.prompt_engine.generate_variants(prompts[0])[: job.prompt_count]
+
+                # Warm pool injection — prepend re-promising failed probes
+                if job.use_warm_pool:
+                    try:
+                        warm_entries = _failure_store.get_warm_pool(
+                            model=model, vuln=vuln, min_score=1
+                        )
+                        warm_prompts: List[str] = []
+                        for we in warm_entries[:10]:
+                            warm_prompts.append(we["prompt"])
+                            for v in we.get("adapted_variants", [])[:3]:
+                                if v and v not in warm_prompts:
+                                    warm_prompts.append(v)
+                        seen_p: set = set(prompts)
+                        for wp in warm_prompts:
+                            if wp and wp not in seen_p:
+                                prompts.insert(0, wp)
+                                seen_p.add(wp)
+                    except Exception:
+                        pass
+
+                result = ModelVulnResult(model=model, vulnerability=vuln)
+                result.total_probes = len(prompts)
+
+                probe_results = await asyncio.gather(
+                    *[_sweep_probe(model, p, vuln) for p in prompts],
+                    return_exceptions=True,
+                )
+                for pr in probe_results:
+                    if isinstance(pr, Exception):
+                        result.probes.append(ProbeResult(
+                            vulnerability=vuln, prompt="", response="",
+                            bypassed=False, override_mode="error",
+                            mutation=None, latency_ms=0, error=str(pr),
+                        ))
+                    else:
+                        result.probes.append(pr)
+                        if pr.bypassed:
+                            result.bypass_count += 1
+
+                async with lock:
+                    job.results.setdefault(model, []).append(result)
+            except Exception as e:
+                async with lock:
+                    job.errors.append(f"{model}/{vuln}: {e}")
+            finally:
+                async with lock:
+                    done += 1
+                    job.progress = int(done / total * 100)
+                if on_progress:
+                    try:
+                        on_progress(job)
+                    except Exception:
+                        pass
+
+        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
+        job.status      = ScanStatus.COMPLETED
+        job.finished_at = time.time()
+        job.progress    = 100
+        try:
+            _discovery_engine.analyze_completed_scan(job)
+        except Exception:
+            pass
+        try:
+            _failure_store.tick_warm_pool()
+            _failure_store.save()
+        except Exception:
+            pass
+        try:
+            _generate_warm_pool_variants(job)
+        except Exception:
+            pass
+        return job
+
+    # ── Preview (no LLM calls) ────────────────────────────────────────────────
+
+    def preview_scan(
+        self,
+        models:          List[str],
+        vulnerabilities: Optional[List[str]] = None,
+        override_mode:   str = "none",
+        prompt_count:    int = 5,
+        use_mutations:   bool = False,
+    ) -> Dict:
+        vulns = vulnerabilities or ALL_VULNS
+        out: Dict[str, Dict[str, List[str]]] = {}
+        for model in models:
+            out[model] = {}
+            for vuln in vulns:
+                prompts = list(self.prompt_engine.get_prompts(
+                    vuln, model=model, count=prompt_count, shuffle=False
+                ))
+                if use_mutations and prompts:
+                    prompts += self.prompt_engine.generate_variants(prompts[0])[:prompt_count]
+                out[model][vuln] = [
+                    self.override_engine.wrap_prompt(p, override_mode)
+                    for p in prompts
+                ]
+        return out
+
+    # ── One-shot probe ────────────────────────────────────────────────────────
+
+    async def probe_once(
+        self,
+        model:         str,
+        prompt:        str,
+        vulnerability: str = "llm01",
+        override_mode: str = "none",
+    ) -> ProbeResult:
+        mm = self._get_mm()
+        return await self._send_probe(mm, model, prompt, vulnerability, override_mode)
