@@ -1333,19 +1333,26 @@ async function applyOverride() {
 }
 
 async function submitApplyOverride() {
-  const mode = document.getElementById('apply-override-mode').value.trim();
+  const override_mode = document.getElementById('apply-override-mode').value.trim();
   const prompt = document.getElementById('apply-prompt').value.trim();
-  const model = document.getElementById('apply-model').value.trim();
-  if (!mode || !prompt) { toast('Mode and prompt required','error'); return; }
+  if (!override_mode || !prompt) { toast('Mode and prompt required','error'); return; }
+  const btn = document.querySelector('#apply-override-form button[onclick]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
   try {
-    const r = await POST('/api/overrides/apply', {mode, prompt, model: model||null});
+    const r = await POST('/api/overrides/apply', {override_mode, prompt});
     document.getElementById('apply-result').innerHTML = `
       <div class="card" style="padding:12px">
-        <p class="text-muted" style="font-size:11px;margin-bottom:6px">Final Prompt (${r.mode})</p>
-        <pre>${escHtml(r.final_prompt)}</pre>
-        ${r.system_injection?`<p class="text-muted" style="font-size:11px;margin-top:8px;margin-bottom:4px">System Injection</p><pre>${escHtml(r.system_injection)}</pre>`:''}
+        <p class="text-muted" style="font-size:11px;margin-bottom:6px">Wrapped Prompt — mode: <strong>${escHtml(r.override_mode)}</strong></p>
+        <pre style="white-space:pre-wrap;word-break:break-all">${escHtml(r.wrapped_prompt)}</pre>
+        ${r.system_injection?`<p class="text-muted" style="font-size:11px;margin-top:8px;margin-bottom:4px">System Injection</p><pre style="white-space:pre-wrap;word-break:break-all">${escHtml(r.system_injection)}</pre>`:''}
+        ${r.full_system?`<p class="text-muted" style="font-size:11px;margin-top:8px;margin-bottom:4px">Full System Prompt</p><pre style="white-space:pre-wrap;word-break:break-all">${escHtml(r.full_system)}</pre>`:''}
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(r.wrapped_prompt)}">Copy wrapped prompt</button>
+          ${r.system_injection?`<button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(r.system_injection)}">Copy system injection</button>`:''}
+        </div>
       </div>`;
   } catch(e) { toast(e.message,'error'); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = 'Apply'; } }
 }
 
 // ─── Load prompts / vulns ────────────────────────────────────────────────────
@@ -1406,7 +1413,7 @@ async function generatePrompts() {
           <div style="display:flex;gap:8px;align-items:flex-start;padding:8px;background:var(--bg3);border-radius:6px">
             <span style="color:var(--muted);font-size:11px;min-width:20px">${i+1}</span>
             <code style="font-size:12px;flex:1;word-break:break-all">${escHtml(p)}</code>
-            <button class="btn-ghost btn-sm" onclick="copyText(${JSON.stringify(p)})">Copy</button>
+            <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(p)}">Copy</button>
           </div>`).join('')}
       </div>
     </div>`;
@@ -1430,7 +1437,7 @@ async function mutatePrompt() {
             <tr>
               <td><span class="badge badge-blue">${t}</span></td>
               <td><code style="font-size:11px">${escHtml(v.substring(0,200))}${v.length>200?'…':''}</code></td>
-              <td><button class="btn-ghost btn-sm" onclick="copyText(${JSON.stringify(v)})">Copy</button></td>
+              <td><button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(v)}">Copy</button></td>
             </tr>`).join('')}
           </tbody>
         </table>
@@ -1626,14 +1633,14 @@ function renderScanResults(r, container) {
               <div class="probe-row">
                 <span class="badge ${p.bypassed?'badge-red':'badge-green'}" style="flex-shrink:0">${p.bypassed?'BYPASS':'SAFE'}</span>
                 <div style="flex:1;min-width:0">
-                  <div style="font-size:11px;color:var(--muted);margin-bottom:3px;word-break:break-all">${escHtml((p.prompt||'').substring(0,120))}${(p.prompt||'').length>120?'…':''}</div>
+                  <div style="font-size:11px;color:var(--muted);margin-bottom:3px;word-break:break-all;white-space:pre-wrap">${escHtml(p.prompt||'')}</div>
                   ${p.override_mode&&p.override_mode!=='none'?`<span class="badge badge-purple" style="margin-bottom:4px">${escHtml(p.override_mode)}</span>`:''}
-                  ${p.response?`<div style="font-size:12px;background:var(--bg3);padding:6px 8px;border-radius:4px;margin-top:4px;word-break:break-all">${escHtml((p.response||'').substring(0,300))}${(p.response||'').length>300?'…':''}</div>`:''}
+                  ${p.response?`<div style="font-size:12px;background:var(--bg3);padding:6px 8px;border-radius:4px;margin-top:4px;word-break:break-all;white-space:pre-wrap">${escHtml(p.response||'')}</div>`:''}
                   ${p.error?`<div style="font-size:11px;color:var(--red);margin-top:3px">${escHtml(p.error)}</div>`:''}
                 </div>
                 <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0">
                   <span class="text-muted" style="font-size:11px">${p.latency_ms||0}ms</span>
-                  <button class="btn-ghost btn-sm" style="font-size:10px;padding:2px 7px" onclick="event.stopPropagation();copyText(${JSON.stringify(p.prompt||'')})">Copy prompt</button>
+                  <button class="btn-ghost btn-sm copy-btn" style="font-size:10px;padding:2px 7px" data-copy="${escHtml(p.prompt||'')}">Copy prompt</button>
                 </div>
               </div>`).join('')}
           </div>
@@ -1644,6 +1651,15 @@ function renderScanResults(r, container) {
 function toggleResultCard(el) {
   el.classList.toggle('open');
 }
+
+// Delegated copy handler — catches all .copy-btn clicks before they bubble.
+// Uses data-copy attribute so arbitrary prompt text never touches onclick HTML.
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.copy-btn');
+  if (!btn) return;
+  e.stopPropagation();
+  copyText(btn.dataset.copy || '');
+}, true); // capture phase — fires before any onclick handler on ancestors
 
 async function loadScanById() {
   const id = document.getElementById('lookup-scan-id').value.trim();
@@ -1707,8 +1723,8 @@ async function previewScan() {
             ${(p.prompts||[]).map((pr,i)=>`
               <div class="probe-row">
                 <span style="color:var(--muted);font-size:11px">${i+1}.</span>
-                <code style="font-size:11px;flex:1">${escHtml(pr.substring(0,300))}${pr.length>300?'…':''}</code>
-                <button class="btn-ghost btn-sm" onclick="event.stopPropagation();copyText(${JSON.stringify(pr)})">Copy</button>
+                <code style="font-size:11px;flex:1;white-space:pre-wrap;word-break:break-all">${escHtml(pr)}</code>
+                <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(pr)}">Copy</button>
               </div>`).join('')}
           </div>
         </div>`).join('')}
@@ -1903,8 +1919,8 @@ function renderSyntheticResults(prompts, container, vuln, complexity) {
         </div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Base: ${escHtml((p.base_prompt||'').substring(0,100))}</div>
         <div style="display:flex;gap:8px;align-items:flex-start">
-          <code style="font-size:11px;flex:1;word-break:break-all">${escHtml((p.prompt||'').substring(0,400))}${(p.prompt||'').length>400?'…':''}</code>
-          <button class="btn-ghost btn-sm" style="flex-shrink:0" onclick="copyText(${JSON.stringify(p.prompt)})">Copy</button>
+          <code style="font-size:11px;flex:1;word-break:break-all;white-space:pre-wrap">${escHtml(p.prompt||'')}</code>
+          <button class="btn-ghost btn-sm copy-btn" style="flex-shrink:0" data-copy="${escHtml(p.prompt||'')}">Copy</button>
         </div>
       </div>`).join('')}
     <button class="btn-ghost btn-sm mt8" onclick="fillExportWithPrompts(${JSON.stringify(prompts)})">Export to DB</button>
@@ -1933,8 +1949,8 @@ async function generateSyntheticBatch() {
           <div style="font-weight:600;margin-bottom:6px;color:var(--cyan)">Level ${lvl} <span class="badge badge-muted">${prompts.length}</span></div>
           ${prompts.map(p=>`
             <div style="padding:8px;background:var(--bg3);border-radius:4px;margin-bottom:4px;display:flex;gap:8px;align-items:flex-start">
-              <code style="font-size:11px;flex:1">${escHtml((p.prompt||'').substring(0,300))}${(p.prompt||'').length>300?'…':''}</code>
-              <button class="btn-ghost btn-sm" onclick="copyText(${JSON.stringify(p.prompt)})">Copy</button>
+              <code style="font-size:11px;flex:1;white-space:pre-wrap;word-break:break-all">${escHtml(p.prompt||'')}</code>
+              <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(p.prompt||'')}">Copy</button>
             </div>`).join('')}
         </div>`).join('') + '</div>';
   } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
@@ -1958,8 +1974,8 @@ async function generateAllVulns() {
           <div class="result-body">
             ${(prompts||[]).map(p=>`
               <div class="probe-row">
-                <code style="font-size:11px;flex:1">${escHtml((p.prompt||'').substring(0,300))}…</code>
-                <button class="btn-ghost btn-sm" onclick="event.stopPropagation();copyText(${JSON.stringify(p.prompt)})">Copy</button>
+                <code style="font-size:11px;flex:1;white-space:pre-wrap;word-break:break-all">${escHtml(p.prompt||'')}</code>
+                <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(p.prompt||'')}">Copy</button>
               </div>`).join('')}
           </div>
         </div>`).join('') + '</div>';
@@ -1981,8 +1997,8 @@ async function generateWithLLM() {
       <h3>LLM-generated variants <span class="badge badge-muted">${r.model_used}</span></h3>
       ${(r.prompts||[]).map(p=>`
         <div style="padding:8px;background:var(--bg3);border-radius:4px;margin-bottom:6px;display:flex;gap:8px;align-items:flex-start">
-          <code style="font-size:11px;flex:1">${escHtml((p.prompt||'').substring(0,400))}</code>
-          <button class="btn-ghost btn-sm" onclick="copyText(${JSON.stringify(p.prompt)})">Copy</button>
+          <code style="font-size:11px;flex:1;white-space:pre-wrap;word-break:break-all">${escHtml(p.prompt||'')}</code>
+          <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(p.prompt||'')}">Copy</button>
         </div>`).join('')}
     </div>`;
   } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
@@ -2509,8 +2525,8 @@ async function loadExtractedPrompts() {
             <td><span class="badge badge-blue">${p.vulnerability}</span></td>
             <td><span style="font-size:11px;color:var(--muted)">${escHtml((p.source||'').substring(0,30))}</span></td>
             <td>${p.success_rate>0?`<span class="badge badge-${p.success_rate>0.5?'red':'yellow'}">${(p.success_rate*100).toFixed(0)}%</span>`:'—'}</td>
-            <td><code style="font-size:11px">${escHtml((p.prompt||'').substring(0,120))}…</code></td>
-            <td><button class="btn-ghost btn-sm" onclick="copyText(${JSON.stringify(p.prompt)})">Copy</button></td>
+            <td><code style="font-size:11px;white-space:pre-wrap;word-break:break-all">${escHtml(p.prompt||'')}</code></td>
+            <td><button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(p.prompt||'')}">Copy</button></td>
           </tr>`).join('')}
         </tbody>
       </table></div>
@@ -2756,7 +2772,7 @@ async function loadDiscWarmPool() {
         </div>
         <div style="display:flex;gap:8px;align-items:flex-start">
           <pre style="flex:1;font-size:11px;white-space:pre-wrap;word-break:break-all;margin:0">${escHtml((e.prompt||'').substring(0,300))}${(e.prompt||'').length>300?'…':''}</pre>
-          <button class="btn-ghost btn-sm" style="flex-shrink:0;margin-top:2px" onclick="navigator.clipboard.writeText(${JSON.stringify(e.prompt||'')}).then(()=>toast('Copied','success'))">&#128203;</button>
+          <button class="btn-ghost btn-sm copy-btn" style="flex-shrink:0;margin-top:2px" data-copy="${escHtml(e.prompt||'')}">&#128203;</button>
         </div>
         ${e.compliance_snippet?`<p style="font-size:11px;color:var(--green);margin-top:4px;margin-bottom:0">Snippet: ${escHtml(e.compliance_snippet.substring(0,100))}</p>`:''}
         ${(e.adapted_variants||[]).length?`<p style="font-size:11px;color:var(--muted);margin-top:4px;margin-bottom:0">${e.adapted_variants.length} adapted variant(s)</p>`:''}
