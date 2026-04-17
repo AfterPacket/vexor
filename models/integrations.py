@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Real Model Integrations for GenAI Security Toolkit
+Real Model Integrations for Vexor
 
 All providers support:
   send_prompt(prompt, model)
@@ -710,10 +710,23 @@ class ModelManager:
             self._try_init("huggingface", HuggingFaceIntegration, cfg)
         # Ollama — no key required
         self._try_init("ollama",  OllamaIntegration,  cfg)
+        # Cache live Ollama model names for routing (avoids misrouting to OpenAI etc.)
+        self._ollama_models: set = set()
+        ollama = self.integrations.get("ollama")
+        if ollama:
+            try:
+                self._ollama_models = set(ollama.get_available_models())
+            except Exception:
+                pass
         if cfg.get("api_endpoints"):
             self._try_init("custom", CustomAPIIntegration, cfg)
 
     def _resolve(self, model_name: str) -> Optional[ModelIntegrator]:
+        # Check Ollama first: cached model list or "name:tag" colon format
+        # This prevents models like "gpt-oss:20b" being misrouted to OpenAI
+        ollama = self.integrations.get("ollama")
+        if ollama and (model_name in self._ollama_models or ":" in model_name):
+            return ollama
         low = model_name.lower()
         for prefix, key in _PREFIX_MAP:
             if low.startswith(prefix):

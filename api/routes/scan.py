@@ -34,7 +34,7 @@ def _get_batch_store(request: Request) -> dict:
     return request.app.state.batch_store
 
 
-async def _run_job(scan_id: str, req: ScanRequest, store: dict):
+async def _run_job(scan_id: str, store: dict):
     job = store.get(scan_id)
     if job is None:
         return
@@ -58,7 +58,7 @@ async def start_scan(
         use_mutations   = req.use_mutations,
     )
     store[job.scan_id] = job
-    background_tasks.add_task(_run_job, job.scan_id, req, store)
+    background_tasks.add_task(_run_job, job.scan_id, store)
     return ScanResponse(scan_id=job.scan_id, status="pending", message="Scan queued")
 
 
@@ -70,6 +70,16 @@ async def get_scan_status(scan_id: str, request: Request):
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
     d = job.to_dict()
     return ScanStatusResponse(**d)
+
+
+@router.post("/{scan_id}/cancel", status_code=200)
+async def cancel_scan(scan_id: str, request: Request):
+    store = _get_store(request)
+    job   = store.get(scan_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
+    job.cancelled = True
+    return {"scan_id": scan_id, "status": "cancelling"}
 
 
 @router.delete("/{scan_id}", status_code=204)

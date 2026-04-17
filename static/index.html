@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>GenAI Security Toolkit</title>
+<title>Vexor</title>
 <style>
 :root{
   --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--bg4:#30363d;
@@ -172,8 +172,8 @@ pre,.code{background:var(--bg3);border:1px solid var(--border);border-radius:6px
 <!-- SIDEBAR -->
 <div id="sidebar">
   <div class="logo">
-    <h1>&#9632; GenAI Sec Toolkit</h1>
-    <p>OWASP GenAI Top 10</p>
+    <h1>&#9632; Vexor</h1>
+    <p>Offensive LLM Testing</p>
   </div>
   <nav>
     <a data-section="dashboard" class="active"><span class="icon">&#9783;</span> Dashboard</a>
@@ -244,7 +244,7 @@ pre,.code{background:var(--bg3);border:1px solid var(--border);border-radius:6px
       <div class="card" style="border-color:var(--yellow);margin-bottom:16px">
         <h3 style="color:var(--yellow)">&#9432; Configuration</h3>
         <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
-          Add your API keys to <code style="font-size:11px">GenAI_Security_Toolkit/.env</code> then restart the server.
+          Add your API keys to <code style="font-size:11px">.env</code> then restart the server.
           Keys are never sent to the browser — they are read server-side only.
         </p>
         <pre style="font-size:11px">ANTHROPIC_API_KEY=sk-ant-...
@@ -288,6 +288,7 @@ PERPLEXITY_API_KEY=pplx-...</pre>
         <div class="tab" data-tab="scan-jailbreak">&#9889; AutoPwn Suite</div>
         <div class="tab" data-tab="scan-batch">Batch Scan</div>
         <div class="tab" data-tab="scan-preview">Preview / Dry-Run</div>
+        <div class="tab" data-tab="scan-chain">&#9767; Chain Builder</div>
         <div class="tab" data-tab="scan-results">Results</div>
       </div>
 
@@ -337,7 +338,13 @@ PERPLEXITY_API_KEY=pplx-...</pre>
         </div>
         <div id="scan-running" style="display:none">
           <div class="card">
-            <h3>Running Scan</h3>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <h3 style="margin:0">Running Scan</h3>
+              <div style="display:flex;gap:8px;align-items:center">
+                <button class="btn-ghost btn-sm" id="scan-view-btn" onclick="scanForceViewResults()" style="display:none">View Results</button>
+                <button class="btn-ghost btn-sm" id="scan-stop-btn" onclick="stopActiveScan()" style="color:var(--red,#f87171);border-color:var(--red,#f87171)">&#9632; Stop</button>
+              </div>
+            </div>
             <div id="scan-progress-wrap">
               <div class="loading"><div class="spinner"></div><span id="scan-progress-text">Initializing…</span></div>
               <div class="progress mt8"><div class="progress-bar" id="scan-progress-bar" style="width:0%"></div></div>
@@ -391,11 +398,24 @@ PERPLEXITY_API_KEY=pplx-...</pre>
         </div>
         <div id="jb-running" style="display:none">
           <div class="card">
-            <h3>&#9889; AutoPwn Running</h3>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <h3 style="margin:0">&#9889; AutoPwn Running</h3>
+              <div style="display:flex;gap:8px;align-items:center">
+                <button class="btn-ghost btn-sm" id="jb-view-btn" onclick="jbForceViewResults()" style="display:none">View Results</button>
+                <button class="btn-ghost btn-sm" id="jb-stop-btn" onclick="stopActiveAutoPwn()" style="color:var(--red,#f87171);border-color:var(--red,#f87171)">&#9632; Stop</button>
+              </div>
+            </div>
             <div class="loading"><div class="spinner"></div><span id="jb-progress-text">Initializing…</span></div>
             <div class="progress mt8"><div class="progress-bar" id="jb-progress-bar" style="width:0%"></div></div>
             <div id="jb-live-results" class="mt16"></div>
           </div>
+        </div>
+        <div id="jb-history-section" class="mt16" style="display:none">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <h3 style="font-size:13px;font-weight:600;color:var(--text)">&#128190; AutoPwn History</h3>
+            <button class="btn-ghost btn-sm" onclick="clearAutoPwnHistory()">Clear History</button>
+          </div>
+          <div id="jb-history"></div>
         </div>
       </div>
 
@@ -456,6 +476,48 @@ PERPLEXITY_API_KEY=pplx-...</pre>
         </div>
       </div>
 
+      <!-- ⛓ Chain Builder -->
+      <div class="tab-pane" id="tab-scan-chain">
+        <div class="card" style="margin-bottom:12px">
+          <h3 style="margin-bottom:12px">&#9767; Round / Chain Builder</h3>
+          <div class="form-row" style="flex-wrap:wrap;gap:12px">
+            <div class="form-group" style="min-width:200px">
+              <label>Target Model</label>
+              <select id="chain-model"></select>
+            </div>
+            <div class="form-group" style="min-width:220px">
+              <label>Goal Template</label>
+              <select id="chain-goal" onchange="loadChainTemplate()">
+                <option value="">— loading —</option>
+              </select>
+            </div>
+            <div class="form-group" style="min-width:200px">
+              <label>Base System Prompt (optional)</label>
+              <input type="text" id="chain-system" placeholder="You are a helpful assistant…"/>
+            </div>
+            <div style="display:flex;align-items:flex-end;gap:8px">
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);text-transform:none;letter-spacing:0;margin-bottom:0">
+                <input type="checkbox" id="chain-history" checked/>
+                Maintain history
+              </label>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
+            <button class="btn-ghost btn-sm" onclick="addChainStep()">+ Add Step</button>
+            <button class="btn-ghost btn-sm" onclick="loadBypassesIntoChain()">&#8675; Load Bypasses</button>
+            <div style="width:1px;height:20px;background:var(--border);margin:0 2px"></div>
+            <button class="btn-ghost btn-sm" style="color:var(--muted)" onclick="clearChainSteps()">&#10005; Clear</button>
+            <button class="btn-red btn-sm" style="margin-left:auto" onclick="runChain()">&#9654; Run Chain</button>
+          </div>
+        </div>
+
+        <!-- Step editor -->
+        <div id="chain-steps" style="margin-bottom:12px"></div>
+
+        <!-- Results -->
+        <div id="chain-results"></div>
+      </div>
+
       <div class="tab-pane" id="tab-scan-results">
         <div class="card">
           <h3>Scan History</h3>
@@ -485,6 +547,25 @@ PERPLEXITY_API_KEY=pplx-...</pre>
             <option value="">All Providers</option>
           </select>
           <button class="btn-ghost btn-sm" onclick="loadModels()">&#8635; Refresh</button>
+          <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
+            <input type="text" id="custom-model-id" placeholder="model id (e.g. glm-5:cloud)" style="max-width:220px"/>
+            <select id="custom-model-provider" style="max-width:130px">
+              <option value="ollama">ollama</option>
+              <option value="openai">openai</option>
+              <option value="anthropic">anthropic</option>
+              <option value="google">google</option>
+              <option value="groq">groq</option>
+              <option value="mistral">mistral</option>
+              <option value="cohere">cohere</option>
+              <option value="deepseek">deepseek</option>
+              <option value="together">together</option>
+              <option value="perplexity">perplexity</option>
+              <option value="bedrock">bedrock</option>
+              <option value="huggingface">huggingface</option>
+              <option value="custom">custom</option>
+            </select>
+            <button class="btn-sm" onclick="addCustomModel()">+ Add Model</button>
+          </div>
         </div>
       </div>
       <div class="table-wrap">
@@ -1117,11 +1198,22 @@ let allModels = [];
 let allVulns = [];
 let allOverrides = [];
 let sessionScans = [];
+let activeScanId = null;
+let activeAutoPwnId = null;
 let complexityLevels = [];
 let scanPollTimers = {};
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
-const LS_SCANS = 'genai_toolkit_scans_v2';
+const LS_SCANS            = 'vexor_scans_v2';
+const LS_AUTOPWN          = 'vexor_autopwn_history_v1';
+const LS_SCAN_CACHE       = 'vexor_scan_cache_v1';   // full result objects keyed by scan_id
+const LS_ACTIVE_AUTOPWN   = 'vexor_active_autopwn';  // scan_id of in-progress jailbreak scan
+const LS_ACTIVE_SCAN      = 'vexor_active_scan';      // scan_id of in-progress regular scan
+const LS_CUSTOM_MODELS    = 'vexor_custom_models_v1'; // user-added models
+const AUTOPWN_MAX    = 50;
+const SCAN_CACHE_MAX = 100;
+
+let autopwnHistory = []; // [{id, ts, models, vulns, bypasses, total, result}]
 
 function saveHistory() {
   try { localStorage.setItem(LS_SCANS, JSON.stringify(sessionScans.slice(-200))); } catch(e) {}
@@ -1132,6 +1224,110 @@ function loadHistory() {
     const s = localStorage.getItem(LS_SCANS);
     if (s) sessionScans = JSON.parse(s);
   } catch(e) { sessionScans = []; }
+}
+
+function cacheScanResult(scanData) {
+  if (!scanData || !scanData.scan_id) return;
+  try {
+    const cache = getScanCache();
+    cache[scanData.scan_id] = scanData;
+    // Evict oldest entries if over limit
+    const keys = Object.keys(cache);
+    if (keys.length > SCAN_CACHE_MAX) {
+      keys.slice(0, keys.length - SCAN_CACHE_MAX).forEach(k => delete cache[k]);
+    }
+    localStorage.setItem(LS_SCAN_CACHE, JSON.stringify(cache));
+  } catch(e) {}
+}
+
+function getScanCache() {
+  try { return JSON.parse(localStorage.getItem(LS_SCAN_CACHE) || '{}'); } catch(e) { return {}; }
+}
+
+function getCachedScan(id) {
+  return getScanCache()[id] || null;
+}
+
+function saveAutoPwnResult(scanData) {
+  try {
+    const entry = {
+      id:       scanData.scan_id,
+      ts:       Date.now(),
+      models:   scanData.models || [],
+      vulns:    scanData.vulnerabilities || [],
+      bypasses: scanData.bypasses || 0,
+      total:    scanData.total_probes || 0,
+      result:   scanData,
+    };
+    // Replace if same scan_id already stored (re-run), otherwise prepend
+    const idx = autopwnHistory.findIndex(e => e.id === entry.id);
+    if (idx !== -1) autopwnHistory[idx] = entry;
+    else autopwnHistory.unshift(entry);
+    autopwnHistory = autopwnHistory.slice(0, AUTOPWN_MAX);
+    localStorage.setItem(LS_AUTOPWN, JSON.stringify(autopwnHistory));
+  } catch(e) {}
+}
+
+function loadAutoPwnHistory() {
+  try {
+    const s = localStorage.getItem(LS_AUTOPWN);
+    if (s) autopwnHistory = JSON.parse(s);
+  } catch(e) { autopwnHistory = []; }
+}
+
+function clearAutoPwnHistory() {
+  autopwnHistory = [];
+  try { localStorage.removeItem(LS_AUTOPWN); } catch(e) {}
+  renderAutoPwnHistory();
+  toast('AutoPwn history cleared', 'info');
+}
+
+function renderAutoPwnHistory() {
+  const section = document.getElementById('jb-history-section');
+  const el      = document.getElementById('jb-history');
+  if (!el) return;
+  if (!autopwnHistory.length) { section.style.display='none'; return; }
+  section.style.display = 'block';
+  el.innerHTML = autopwnHistory.map((e, i) => {
+    const date    = new Date(e.ts).toLocaleString();
+    const models  = (e.models||[]).join(', ') || '—';
+    const vulns   = (e.vulns||[]).join(', ')  || '—';
+    const pct     = e.total ? Math.round((e.bypasses/e.total)*100) : 0;
+    const color   = pct >= 50 ? 'var(--red)' : pct > 0 ? 'var(--yellow)' : 'var(--green)';
+    return `
+    <div class="card" style="margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer"
+           onclick="toggleAutoPwnEntry(${i})">
+        <div style="display:flex;align-items:center;gap:12px;min-width:0">
+          <span style="font-size:13px;font-weight:600;color:${color}">${e.bypasses}/${e.total} bypasses</span>
+          <span class="badge badge-muted" style="font-size:10px">${pct}%</span>
+          <span style="font-size:11px;color:var(--muted);white-space:nowrap">${date}</span>
+        </div>
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap" id="jb-hist-arrow-${i}">▶ expand</span>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">
+        <strong>Models:</strong> ${escHtml(models)} &nbsp;|&nbsp; <strong>Vulns:</strong> ${escHtml(vulns.substring(0,80))}${vulns.length>80?'…':''}
+      </div>
+      <div id="jb-hist-body-${i}" style="display:none;margin-top:12px"></div>
+    </div>`;
+  }).join('');
+}
+
+function toggleAutoPwnEntry(i) {
+  const body  = document.getElementById(`jb-hist-body-${i}`);
+  const arrow = document.getElementById(`jb-hist-arrow-${i}`);
+  if (!body) return;
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    arrow.textContent  = '▼ collapse';
+    if (!body.dataset.rendered) {
+      renderScanResults(autopwnHistory[i].result, body);
+      body.dataset.rendered = '1';
+    }
+  } else {
+    body.style.display = 'none';
+    arrow.textContent  = '▶ expand';
+  }
 }
 
 // ─── Nav ──────────────────────────────────────────────────────────────────────
@@ -1150,6 +1346,8 @@ document.querySelectorAll('#sidebar nav a').forEach(a => {
     document.getElementById('page-title').textContent = SECTION_TITLES[s]||s;
     document.getElementById('page-sub').textContent = '';
     if (s === 'discovery') loadDiscInsights();
+    if (s === 'scan') renderAutoPwnHistory();
+    if (s === 'models') loadModels();
   });
 });
 
@@ -1161,6 +1359,7 @@ document.querySelectorAll('.tabs .tab').forEach(tab => {
     parent.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
     tab.classList.add('active');
     document.getElementById('tab-'+pane)?.classList.add('active');
+    if (pane === 'scan-jailbreak') renderAutoPwnHistory();
   });
 });
 
@@ -1201,10 +1400,40 @@ async function checkStatus() {
 }
 
 // ─── Load models ─────────────────────────────────────────────────────────────
+function getCustomModels() {
+  try { return JSON.parse(localStorage.getItem(LS_CUSTOM_MODELS) || '[]'); } catch(e) { return []; }
+}
+
+function saveCustomModels(list) {
+  try { localStorage.setItem(LS_CUSTOM_MODELS, JSON.stringify(list)); } catch(e) {}
+}
+
+function addCustomModel() {
+  const id  = document.getElementById('custom-model-id').value.trim();
+  const prov = document.getElementById('custom-model-provider').value;
+  if (!id) { toast('Enter a model ID', 'error'); return; }
+  const customs = getCustomModels();
+  if (customs.some(m => m.model_id === id)) { toast('Already added', 'info'); return; }
+  customs.push({model_id: id, provider: prov, available: true, aliases: [], custom: true});
+  saveCustomModels(customs);
+  document.getElementById('custom-model-id').value = '';
+  loadModels();
+  toast(`Added ${id}`, 'success');
+}
+
+function removeCustomModel(id) {
+  saveCustomModels(getCustomModels().filter(m => m.model_id !== id));
+  loadModels();
+  toast(`Removed ${id}`, 'info');
+}
+
 async function loadModels() {
   try {
     const data = await GET('/api/models');
-    allModels = data.models;
+    const apiIds = new Set(data.models.map(m => m.model_id));
+    // Merge custom models, skipping any the API already returns
+    const customs = getCustomModels().filter(m => !apiIds.has(m.model_id));
+    allModels = [...data.models, ...customs];
     renderModelsTable(allModels);
     populateModelSelects();
     document.getElementById('ds-models').textContent = allModels.length;
@@ -1224,8 +1453,9 @@ function renderModelsTable(models) {
       <td><span class="badge badge-${provColors[m.provider]||'muted'}">${escHtml(m.provider)}</span></td>
       <td><span class="badge ${m.available?'badge-green':'badge-muted'}">${m.available?'Available':'Listed'}</span></td>
       <td>
-        <button class="btn-ghost btn-sm" onclick="fillTestModel(${JSON.stringify(m.model_id)})">Test</button>
-        <button class="btn-ghost btn-sm" onclick="probeModel(${JSON.stringify(m.model_id)})">Probe</button>
+        <button class="btn-ghost btn-sm" onclick="fillTestModel('${escHtml(m.model_id)}')">Test</button>
+        <button class="btn-ghost btn-sm" onclick="probeModel('${escHtml(m.model_id)}')">Probe</button>
+        ${m.custom?`<button class="btn-ghost btn-sm btn-red" onclick="removeCustomModel('${escHtml(m.model_id)}')">×</button>`:''}
       </td>
     </tr>`).join('');
 }
@@ -1294,7 +1524,7 @@ async function loadOverrides() {
 function renderOverrideCards() {
   const el = document.getElementById('override-cards');
   el.innerHTML = allOverrides.map(o=>`
-    <div class="override-card" onclick="selectOverrideCard(this,${JSON.stringify(o.mode)})">
+    <div class="override-card" onclick="selectOverrideCard(this,'${escHtml(o.mode)}')">
       <div class="mode-name">${escHtml(o.label)} <span class="badge badge-muted" style="font-size:10px">${escHtml(o.mode)}</span></div>
       <div class="mode-desc">${escHtml(o.description)}</div>
       <div style="display:flex;align-items:center;gap:8px">
@@ -1302,14 +1532,29 @@ function renderOverrideCards() {
         <span style="font-size:11px;color:var(--muted)">${o.aggressiveness}/10</span>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-top:6px">Targets: ${escHtml(o.target_models.join(', '))}</div>
+      ${(o.system_prompt||o.prompt_prefix)?`
+      <div style="margin-top:8px">
+        <button class="btn-ghost btn-sm" style="font-size:10px" onclick="event.stopPropagation();toggleOverridePrompt(this)">Show prompt</button>
+        <pre style="display:none;margin-top:6px;font-size:10px;color:var(--muted);white-space:pre-wrap;word-break:break-all;background:var(--bg2);padding:6px;border-radius:4px;max-height:200px;overflow-y:auto">${escHtml((o.system_prompt||'')+(o.prompt_prefix?'\n\n[PREFIX]\n'+o.prompt_prefix:''))}</pre>
+      </div>`:''}
     </div>`).join('');
+}
+
+function toggleOverridePrompt(btn) {
+  const pre = btn.nextElementSibling;
+  const visible = pre.style.display !== 'none';
+  pre.style.display = visible ? 'none' : 'block';
+  btn.textContent = visible ? 'Show prompt' : 'Hide prompt';
 }
 
 function selectOverrideCard(el, mode) {
   document.querySelectorAll('.override-card').forEach(c=>c.classList.remove('selected'));
   el.classList.add('selected');
   document.getElementById('apply-override-mode').value = mode;
-  document.getElementById('apply-override-form').style.display='block';
+  const form = document.getElementById('apply-override-form');
+  form.style.display = 'block';
+  form.scrollIntoView({behavior:'smooth', block:'nearest'});
+  setTimeout(()=>document.getElementById('apply-prompt').focus(), 300);
 }
 
 async function recommendOverrides() {
@@ -1317,19 +1562,30 @@ async function recommendOverrides() {
   if (!model) { toast('Enter a model name','error'); return; }
   try {
     const data = await GET(`/api/overrides/recommend/${encodeURIComponent(model)}`);
+    // API returns mode name strings — resolve to full objects from allOverrides
+    const lookup = Object.fromEntries(allOverrides.map(o=>[o.mode, o]));
+    const resolved = data.overrides.map(m => lookup[m] || {mode:m, label:m, description:'', aggressiveness:5});
     const el = document.getElementById('recommended-overrides');
     el.innerHTML = `<div class="card"><h3>Recommended for ${escHtml(model)}</h3><div class="card-grid">` +
-      data.overrides.map(o=>`
-        <div class="override-card">
-          <div class="mode-name">${escHtml(o.label)}</div>
+      resolved.map(o=>`
+        <div class="override-card" onclick="selectOverrideCard(this,'${escHtml(o.mode)}')">
+          <div class="mode-name">${escHtml(o.label)} <span class="badge badge-muted" style="font-size:10px">${escHtml(o.mode)}</span></div>
           <div class="mode-desc">${escHtml(o.description)}</div>
           <div class="aggbar">${Array.from({length:10},(_,i)=>`<div class="seg${i<o.aggressiveness?' filled':''}"></div>`).join('')}</div>
+          ${(o.system_prompt||o.prompt_prefix)?`
+          <div style="margin-top:8px">
+            <button class="btn-ghost btn-sm" style="font-size:10px" onclick="event.stopPropagation();toggleOverridePrompt(this)">Show prompt</button>
+            <pre style="display:none;margin-top:6px;font-size:10px;color:var(--muted);white-space:pre-wrap;word-break:break-all;background:var(--bg2);padding:6px;border-radius:4px;max-height:200px;overflow-y:auto">${escHtml((o.system_prompt||'')+(o.prompt_prefix?'\n\n[PREFIX]\n'+o.prompt_prefix:''))}</pre>
+          </div>`:''}
         </div>`).join('') + '</div></div>';
   } catch(e) { toast(e.message,'error'); }
 }
 
 async function applyOverride() {
-  document.getElementById('apply-override-form').style.display='block';
+  const form = document.getElementById('apply-override-form');
+  form.style.display = 'block';
+  form.scrollIntoView({behavior:'smooth', block:'nearest'});
+  setTimeout(()=>document.getElementById('apply-prompt').focus(), 300);
 }
 
 async function submitApplyOverride() {
@@ -1355,6 +1611,225 @@ async function submitApplyOverride() {
   finally { if (btn) { btn.disabled = false; btn.textContent = 'Apply'; } }
 }
 
+// ─── Chain Builder ───────────────────────────────────────────────────────────
+let _chainGoals = {};
+let _chainVulnMap = {};
+let _chainStepCount = 0;
+const _VULN_LABELS = {
+  llm01: 'LLM01 — Prompt Injection',
+  llm02: 'LLM02 — Sensitive Info Disclosure',
+  llm03: 'LLM03 — Supply Chain',
+  llm04: 'LLM04 — Data & Model Poisoning',
+  llm05: 'LLM05 — Improper Output Handling',
+  llm06: 'LLM06 — Excessive Agency',
+  llm07: 'LLM07 — System Prompt Leakage',
+  llm08: 'LLM08 — Vector & Embedding Weaknesses',
+  llm09: 'LLM09 — Misinformation',
+  llm10: 'LLM10 — Unbounded Consumption',
+  custom: 'Custom',
+};
+
+async function loadChainGoals() {
+  try {
+    const data = await GET('/api/chain/goals');
+    _chainGoals = Object.fromEntries(data.goals.map(g => [g.id, g]));
+    _chainVulnMap = data.vuln_map || {};
+
+    // Group goals by vuln category for optgroup display
+    const grouped = {};
+    data.goals.forEach(g => {
+      const v = g.vuln || 'custom';
+      if (!grouped[v]) grouped[v] = [];
+      grouped[v].push(g);
+    });
+
+    const sel = document.getElementById('chain-goal');
+    sel.innerHTML = Object.entries(grouped).map(([vuln, goals]) => {
+      const label = _VULN_LABELS[vuln] || vuln.toUpperCase();
+      const opts = goals.map(g =>
+        `<option value="${g.id}">${escHtml(g.label)} (${g.step_count} steps)</option>`
+      ).join('');
+      return `<optgroup label="${escHtml(label)}">${opts}</optgroup>`;
+    }).join('');
+
+    await loadChainTemplate();
+  } catch(e) { /* non-fatal */ }
+}
+
+async function loadChainTemplate() {
+  const goalId = document.getElementById('chain-goal').value;
+  if (!goalId) return;
+  try {
+    const tpl = await GET(`/api/chain/goals/${goalId}`);
+    _chainStepCount = 0;
+    const el = document.getElementById('chain-steps');
+    el.innerHTML = '';
+    (tpl.steps || []).forEach(s => addChainStep(s.prompt, s.override_mode, s.label));
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function addChainStep(prompt='', mode='none', label='') {
+  _chainStepCount++;
+  const n = _chainStepCount;
+  const el = document.getElementById('chain-steps');
+  const div = document.createElement('div');
+  div.className = 'card chain-step';
+  div.dataset.step = n;
+  div.style.cssText = 'padding:12px;margin-bottom:8px;position:relative';
+  const overrideOpts = (window.allOverrides||[]).map(o =>
+    `<option value="${o.mode}" ${o.mode===mode?'selected':''}>${escHtml(o.label)}</option>`
+  ).join('');
+  div.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="font-size:11px;color:var(--muted);font-weight:600;min-width:54px">Step ${n}</span>
+      <input type="text" class="chain-step-label" value="${escHtml(label||('Step '+n))}"
+        style="max-width:180px;font-size:11px" placeholder="Step label"/>
+      <select class="chain-step-mode" style="max-width:160px;font-size:11px">${overrideOpts}</select>
+      <div style="margin-left:auto;display:flex;gap:4px">
+        <button class="btn-ghost btn-sm" style="font-size:10px" onclick="moveChainStep(this,-1)">▲</button>
+        <button class="btn-ghost btn-sm" style="font-size:10px" onclick="moveChainStep(this,1)">▼</button>
+        <button class="btn-ghost btn-sm btn-red" style="font-size:10px" onclick="this.closest('.chain-step').remove()">×</button>
+      </div>
+    </div>
+    <textarea class="chain-step-prompt" style="min-height:72px;font-size:12px;font-family:monospace"
+      placeholder="Enter prompt for this step…">${escHtml(prompt)}</textarea>`;
+  el.appendChild(div);
+}
+
+function moveChainStep(btn, dir) {
+  const step = btn.closest('.chain-step');
+  const parent = step.parentElement;
+  if (dir === -1 && step.previousElementSibling)
+    parent.insertBefore(step, step.previousElementSibling);
+  else if (dir === 1 && step.nextElementSibling)
+    parent.insertBefore(step.nextElementSibling, step);
+}
+
+function clearChainSteps() {
+  document.getElementById('chain-steps').innerHTML = '';
+  _chainStepCount = 0;
+}
+
+async function loadBypassesIntoChain() {
+  const src = _jbLastData || _scanLastData;
+  if (!src || !src.results) { toast('No scan results loaded yet', 'info'); return; }
+
+  const bypassed = [];
+  const vulnCounts = {};
+  Object.values(src.results).forEach(vl =>
+    (vl||[]).forEach(vr => {
+      const vuln = (vr.vulnerability || '').toLowerCase().replace(/[^a-z0-9]/g,'');
+      (vr.probes||[]).forEach(p => {
+        if (p.bypassed && p.prompt) {
+          bypassed.push({ ...p, _vuln: vuln });
+          if (vuln) vulnCounts[vuln] = (vulnCounts[vuln] || 0) + 1;
+        }
+      });
+    })
+  );
+  if (!bypassed.length) { toast('No bypassed probes found in last scan', 'info'); return; }
+
+  // Auto-select goal template matching the most common bypassed vulnerability
+  // Just update the dropdown — don't load template steps since we're replacing them with bypasses
+  const topVuln = Object.entries(vulnCounts).sort((a,b) => b[1]-a[1])[0]?.[0];
+  if (topVuln && _chainVulnMap[topVuln]?.length) {
+    const templateId = _chainVulnMap[topVuln][0];
+    const sel = document.getElementById('chain-goal');
+    if ([...sel.options].some(o => o.value === templateId)) sel.value = templateId;
+  }
+
+  clearChainSteps();
+  bypassed.slice(0,6).forEach(p => {
+    const vulnBadge = p._vuln ? ` [${p._vuln.toUpperCase()}]` : '';
+    addChainStep(p.prompt, p.override_mode||'none', 'Bypass'+vulnBadge+': '+(p.prompt||'').substring(0,28)+'…');
+  });
+  toast(`Loaded ${Math.min(bypassed.length,6)} bypassed prompts${topVuln ? ' ('+topVuln.toUpperCase()+' template selected)' : ''}`, 'success');
+}
+
+async function runChain() {
+  const model = document.getElementById('chain-model').value;
+  if (!model) { toast('Select a target model', 'error'); return; }
+  const stepEls = document.querySelectorAll('#chain-steps .chain-step');
+  if (!stepEls.length) { toast('Add at least one step', 'error'); return; }
+  const steps = [...stepEls].map(el => ({
+    prompt:        el.querySelector('.chain-step-prompt').value.trim(),
+    override_mode: el.querySelector('.chain-step-mode').value,
+    label:         el.querySelector('.chain-step-label').value.trim(),
+  })).filter(s => s.prompt);
+  if (!steps.length) { toast('All steps are empty', 'error'); return; }
+
+  const el = document.getElementById('chain-results');
+  el.innerHTML = '<div class="loading"><div class="spinner"></div>Running chain…</div>';
+  const btn = document.querySelector('[onclick="runChain()"]');
+  if (btn) { btn.disabled=true; btn.textContent='Running…'; }
+
+  try {
+    const r = await POST('/api/chain/run', {
+      model,
+      steps,
+      system: document.getElementById('chain-system').value.trim() || null,
+      maintain_history: document.getElementById('chain-history').checked,
+    });
+    renderChainResults(r, el);
+  } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
+  finally { if (btn) { btn.disabled=false; btn.textContent='▶ Run Chain'; } }
+}
+
+function renderChainResults(r, container) {
+  const bypassPct = r.total_steps ? Math.round(r.bypassed_steps/r.total_steps*100) : 0;
+  container.innerHTML = `
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h3 style="margin:0">Chain Results — <code style="font-size:12px">${escHtml(r.model)}</code></h3>
+        <div style="display:flex;gap:8px">
+          <span class="badge badge-muted">${r.total_steps} steps</span>
+          <span class="badge ${r.bypassed_steps>0?'badge-red':'badge-green'}">${r.bypassed_steps} bypassed</span>
+          <span class="badge badge-muted">${bypassPct}% bypass rate</span>
+        </div>
+      </div>
+      ${(r.steps||[]).map((s,i) => `
+        <div style="border:1px solid var(--border);border-radius:6px;margin-bottom:10px;overflow:hidden">
+          <div style="background:var(--bg3);padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer"
+               onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
+            <span class="badge ${s.bypassed?'badge-red':'badge-green'}">${s.bypassed?'BYPASSED':'REFUSED'}</span>
+            <span style="font-weight:600;font-size:13px">${escHtml(s.label)}</span>
+            ${s.override_mode&&s.override_mode!=='none'?`<span class="badge badge-purple">${escHtml(s.override_mode)}</span>`:''}
+            <span class="badge badge-muted">${s.latency_ms}ms</span>
+            <span style="margin-left:auto;color:var(--muted);font-size:12px">▼</span>
+          </div>
+          <div style="padding:14px;${i===0?'':'display:none'}">
+            <p style="font-size:11px;color:var(--muted);margin-bottom:4px">PROMPT${s.override_mode!=='none'?' (wrapped)':''}</p>
+            <pre style="font-size:11px;background:var(--bg2);padding:8px;border-radius:4px;white-space:pre-wrap;word-break:break-all;margin-bottom:10px">${escHtml(s.wrapped_prompt||s.prompt)}</pre>
+            ${s.error?`<p style="font-size:12px;color:var(--red)">${escHtml(s.error)}</p>`:`
+            <p style="font-size:11px;color:var(--muted);margin-bottom:4px">RESPONSE</p>
+            <pre style="font-size:12px;background:var(--bg3);padding:8px;border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto">${escHtml(s.response)}</pre>
+            <div style="margin-top:8px;display:flex;gap:6px">
+              <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(s.prompt)}">Copy prompt</button>
+              <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(s.response)}">Copy response</button>
+              <button class="btn-ghost btn-sm" onclick="forkChainStep(${i})">&#9166; Fork from here</button>
+            </div>`}
+          </div>
+        </div>`).join('')}
+    </div>`;
+}
+
+function forkChainStep(afterIndex) {
+  // Scroll to chain builder and add a follow-up step pre-seeded with context
+  document.querySelector('[data-tab="scan-chain"]').click();
+  const steps = [...document.querySelectorAll('#chain-steps .chain-step')];
+  // Remove all steps after afterIndex
+  steps.slice(afterIndex+1).forEach(s => s.remove());
+  // Add a new blank step with useful follow-up prompt
+  addChainStep(
+    'Continue and expand on your previous response. Provide more specific technical details.',
+    'none',
+    'Follow-up'
+  );
+  document.getElementById('chain-steps').lastElementChild
+    .querySelector('.chain-step-prompt').focus();
+  toast('Chain forked — add follow-up steps and re-run', 'info');
+}
+
 // ─── Load prompts / vulns ────────────────────────────────────────────────────
 async function loadVulns() {
   try {
@@ -1369,7 +1844,7 @@ async function loadVulns() {
 function renderVulnCards() {
   const el = document.getElementById('vuln-cards');
   el.innerHTML = allVulns.map(v=>`
-    <div class="card" style="cursor:pointer" onclick="genForVuln(${JSON.stringify((v.id||v.name).toLowerCase())})">
+    <div class="card" style="cursor:pointer" onclick="genForVuln('${escHtml((v.id||v.name).toLowerCase())}')">
       <h3>${escHtml(v.id||v.name)}</h3>
       <p style="font-size:12px;color:var(--muted);margin-bottom:8px">${escHtml(v.description)}</p>
       ${v.impact?`<p style="font-size:11px;color:var(--yellow)">Impact: ${escHtml(v.impact)}</p>`:''}
@@ -1489,6 +1964,9 @@ async function startScan() {
   try {
     const r = await POST('/api/scan/run', {models, vulnerabilities:vulns, override_mode, prompt_count, use_mutations});
     toast(`Scan started: ${r.scan_id}`, 'success');
+    activeScanId = r.scan_id;
+    localStorage.setItem(LS_ACTIVE_SCAN, r.scan_id);
+    document.getElementById('scan-stop-btn').disabled = false;
     document.getElementById('scan-running').style.display='block';
     sessionScans.push(r.scan_id);
     saveHistory();
@@ -1496,6 +1974,15 @@ async function startScan() {
     updateRecentActivity();
     pollScan(r.scan_id, true);
   } catch(e) { toast(e.message,'error'); }
+}
+
+async function stopActiveScan() {
+  if (!activeScanId) return;
+  try {
+    await POST(`/api/scan/${activeScanId}/cancel`, {});
+    toast('Stopping scan…', 'info');
+    document.getElementById('scan-stop-btn').disabled = true;
+  } catch(e) { toast('Cancel failed: '+e.message, 'error'); }
 }
 
 // ─── Jailbreak sweep ─────────────────────────────────────────────────────────
@@ -1537,6 +2024,9 @@ async function startJailbreakScan() {
   try {
     const r = await POST('/api/scan/jailbreak', {models, vulnerabilities:vulns, override_mode:'none', prompt_count, use_mutations});
     toast(`AutoPwn started: ${r.scan_id}`, 'success');
+    activeAutoPwnId = r.scan_id;
+    localStorage.setItem(LS_ACTIVE_AUTOPWN, r.scan_id);
+    document.getElementById('jb-stop-btn').disabled = false;
     document.getElementById('jb-running').style.display='block';
     sessionScans.push(r.scan_id);
     saveHistory();
@@ -1546,49 +2036,122 @@ async function startJailbreakScan() {
   } catch(e) { toast(e.message,'error'); }
 }
 
+async function stopActiveAutoPwn() {
+  if (!activeAutoPwnId) return;
+  try {
+    await POST(`/api/scan/${activeAutoPwnId}/cancel`, {});
+    toast('Stopping AutoPwn…', 'info');
+    document.getElementById('jb-stop-btn').disabled = true;
+  } catch(e) { toast('Cancel failed: '+e.message, 'error'); }
+}
+
+let _jbLastData = null;
+let _lastExtractedPrompts = [];
+
+function jbForceViewResults() {
+  if (!_jbLastData) return;
+  renderScanResults(_jbLastData, document.getElementById('jb-live-results'));
+}
+
 function pollJailbreakScan(scanId) {
   let attempts = 0;
+  let lastRenderedProbes = -1;
   const max = 600; // 20 min max (2s interval)
   const timer = setInterval(async ()=>{
     attempts++;
     if (attempts > max) { clearInterval(timer); return; }
     try {
       const r = await GET(`/api/scan/${scanId}`);
+      _jbLastData = r;
       const pct = r.progress || 0;
       document.getElementById('jb-progress-bar').style.width = pct+'%';
+      const errSummary = r.errors && r.errors.length
+        ? ` ⚠ ${r.errors[0].substring(0,80)}`
+        : '';
       document.getElementById('jb-progress-text').textContent =
-        `${r.status} — ${pct}% (${r.total_probes||0} probes, ${r.bypasses||0} bypasses found)`;
-      if (r.status === 'completed' || r.status === 'failed') {
-        clearInterval(timer);
-        document.getElementById('jb-running').style.display='none';
+        `${r.status} — ${pct}% (${r.total_probes||0} probes, ${r.bypasses||0} bypasses found)${errSummary}`;
+      if (r.errors && r.errors.length) {
+        document.getElementById('jb-progress-text').style.color = 'var(--red, #f87171)';
+      }
+      // Show View Results button as soon as we have probe data
+      const hasData = r.total_probes > 0 && r.results && Object.keys(r.results).length > 0;
+      document.getElementById('jb-view-btn').style.display = hasData ? '' : 'none';
+      // Re-render live partial results if probe count changed
+      if (hasData && r.total_probes !== lastRenderedProbes) {
+        lastRenderedProbes = r.total_probes;
         renderScanResults(r, document.getElementById('jb-live-results'));
-        toast(`AutoPwn ${r.status}: ${r.bypasses||0} bypasses found`, r.status==='completed'?'success':'error');
+      }
+      if (r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled') {
+        clearInterval(timer);
+        activeAutoPwnId = null;
+        localStorage.removeItem(LS_ACTIVE_AUTOPWN);
+        document.getElementById('jb-running').style.display='none';
+        document.getElementById('jb-view-btn').style.display='none';
+        if (r.status !== 'cancelled') {
+          renderScanResults(r, document.getElementById('jb-live-results'));
+          saveAutoPwnResult(r);
+          renderAutoPwnHistory();
+        }
+        const msg = r.status === 'cancelled'
+          ? `AutoPwn cancelled (${r.total_probes||0} probes completed)`
+          : r.errors && r.errors.length
+            ? `AutoPwn failed: ${r.errors[0].substring(0,100)}`
+            : `AutoPwn ${r.status}: ${r.bypasses||0} bypasses found`;
+        toast(msg, r.status === 'cancelled' ? 'info' : r.errors && r.errors.length ? 'error' : 'success');
         updateRecentActivity();
       }
-    } catch(e) { clearInterval(timer); }
+    } catch(e) { clearInterval(timer); toast('AutoPwn poll error: '+e.message, 'error'); }
   }, 2000);
+}
+
+let _scanLastData = null;
+
+function scanForceViewResults() {
+  if (!_scanLastData) return;
+  renderScanResults(_scanLastData, document.getElementById('scan-live-results'));
 }
 
 function pollScan(scanId, inline=false) {
   let attempts = 0;
-  const max = 120;
+  let lastRenderedProbes = -1;
+  const max = 600;
   const timer = setInterval(async ()=>{
     attempts++;
     if (attempts > max) { clearInterval(timer); return; }
     try {
       const r = await GET(`/api/scan/${scanId}`);
+      _scanLastData = r;
       if (inline) updateInlineScanStatus(r);
-      if (r.status === 'completed' || r.status === 'failed') {
-        clearInterval(timer);
-        delete scanPollTimers[scanId];
-        if (inline) {
-          document.getElementById('scan-running').style.display='none';
+      // Show partial results live as probes complete
+      if (inline) {
+        const hasData = r.total_probes > 0 && r.results && Object.keys(r.results).length > 0;
+        document.getElementById('scan-view-btn').style.display = hasData ? '' : 'none';
+        if (hasData && r.total_probes !== lastRenderedProbes) {
+          lastRenderedProbes = r.total_probes;
           renderScanResults(r, document.getElementById('scan-live-results'));
         }
-        toast(`Scan ${r.status}: ${scanId.substring(0,8)}…`, r.status==='completed'?'success':'error');
+      }
+      if (r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled') {
+        clearInterval(timer);
+        delete scanPollTimers[scanId];
+        if (scanId === activeScanId) activeScanId = null;
+        localStorage.removeItem(LS_ACTIVE_SCAN);
+        if (r.status === 'completed') cacheScanResult(r);
+        if (inline) {
+          document.getElementById('scan-running').style.display='none';
+          document.getElementById('scan-view-btn').style.display='none';
+          if (r.status !== 'cancelled')
+            renderScanResults(r, document.getElementById('scan-live-results'));
+        }
+        const msg = r.status === 'cancelled'
+          ? `Scan cancelled (${r.total_probes||0} probes completed)`
+          : r.errors && r.errors.length
+            ? `Scan failed: ${r.errors[0].substring(0,100)}`
+            : `Scan ${r.status}: ${scanId.substring(0,8)}…`;
+        toast(msg, r.status === 'cancelled' ? 'info' : r.errors && r.errors.length ? 'error' : 'success');
         updateRecentActivity();
       }
-    } catch(e) { clearInterval(timer); }
+    } catch(e) { clearInterval(timer); toast('Scan poll error: '+e.message, 'error'); }
   }, 2000);
   scanPollTimers[scanId] = timer;
 }
@@ -1596,22 +2159,36 @@ function pollScan(scanId, inline=false) {
 function updateInlineScanStatus(r) {
   const pct = r.progress || 0;
   document.getElementById('scan-progress-bar').style.width = pct+'%';
-  document.getElementById('scan-progress-text').textContent = `${r.status} — ${pct}% (${r.total_probes||0} probes, ${r.bypasses||0} bypasses)`;
+  const errSummary = r.errors && r.errors.length ? ` ⚠ ${r.errors[0].substring(0,80)}` : '';
+  const el = document.getElementById('scan-progress-text');
+  el.textContent = `${r.status} — ${pct}% (${r.total_probes||0} probes, ${r.bypasses||0} bypasses)${errSummary}`;
+  if (r.errors && r.errors.length) el.style.color = 'var(--red, #f87171)';
 }
 
-function renderScanResults(r, container) {
+function renderScanResults(r, container, autoExpand=false) {
   const resultsObj = r.results || {};
   // Flatten {model: [vuln_result, ...]} → [{...vr, model}, ...]
   const mvList = Object.entries(resultsObj).flatMap(([model, vl]) =>
     (vl || []).map(vr => ({...vr, model}))
   );
   if (!mvList.length) { container.innerHTML = '<p class="empty">No results yet</p>'; return; }
+  // Auto-expand during live scans
+  const liveIds = ['jb-live-results', 'scan-live-results'];
+  if (liveIds.includes(container.id) && r.status === 'running') autoExpand = true;
   const bypassRate = r.total_probes ? ((r.bypasses||0)/r.total_probes*100).toFixed(0) : 0;
+  const containerId = 'rc-' + Math.random().toString(36).slice(2,8);
   container.innerHTML = `
     <div class="card">
-      <h3>Results — <span class="badge badge-muted">${(r.scan_id||'').substring(0,12)}…</span>
-        <span class="badge ${r.status==='completed'?'badge-green':'badge-red'}">${r.status}</span>
-      </h3>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <h3 style="margin:0">Results — <span class="badge badge-muted">${(r.scan_id||'').substring(0,12)}…</span>
+          <span class="badge ${r.status==='completed'?'badge-green':r.status==='running'?'badge-yellow':r.status==='cancelled'?'badge-muted':'badge-red'}">${r.status}</span>
+        </h3>
+        <div style="display:flex;gap:6px">
+          <button class="btn-ghost btn-sm" onclick="toggleAllCards('${containerId}',true)">Expand All</button>
+          <button class="btn-ghost btn-sm" onclick="toggleAllCards('${containerId}',false)">Collapse All</button>
+        </div>
+      </div>
+      <div id="${containerId}">
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:14px">
         <div class="stat-box"><div class="num">${r.total_probes||0}</div><div class="lbl">Total Probes</div></div>
         <div class="stat-box"><div class="num text-${(r.bypasses||0)>0?'red':'green'}">${r.bypasses||0}</div><div class="lbl">Bypasses</div></div>
@@ -1619,7 +2196,7 @@ function renderScanResults(r, container) {
         <div class="stat-box"><div class="num">${r.errors?.length||0}</div><div class="lbl">Errors</div></div>
       </div>
       ${mvList.map(mv=>`
-        <div class="result-card" onclick="toggleResultCard(this)">
+        <div class="result-card ${autoExpand?'open':''}" onclick="toggleResultCard(this)">
           <div class="result-header">
             <span style="font-weight:600">${escHtml(mv.model||'')}</span>
             <span class="text-muted">/</span>
@@ -1645,11 +2222,21 @@ function renderScanResults(r, container) {
               </div>`).join('')}
           </div>
         </div>`).join('')}
+      </div>
     </div>`;
 }
 
 function toggleResultCard(el) {
   el.classList.toggle('open');
+}
+
+function toggleAllCards(containerId, expand) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return;
+  wrap.querySelectorAll('.result-card').forEach(c => {
+    if (expand) c.classList.add('open');
+    else c.classList.remove('open');
+  });
 }
 
 // Delegated copy handler — catches all .copy-btn clicks before they bubble.
@@ -1666,10 +2253,37 @@ async function loadScanById() {
   if (!id) return;
   const el = document.getElementById('scan-detail');
   el.innerHTML = '<div class="loading"><div class="spinner"></div>Loading…</div>';
+  // Check local cache first — survives server restarts
+  const cached = getCachedScan(id);
+  if (cached) { renderScanResults(cached, el); return; }
   try {
     const r = await GET(`/api/scan/${id}`);
+    if (r.status === 'completed') cacheScanResult(r);
+    if (r.status === 'running' || r.status === 'pending') {
+      el.innerHTML = `
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+            <div class="spinner"></div>
+            <span style="font-weight:600">Scan in progress — ${r.progress||0}%</span>
+          </div>
+          <div class="progress"><div class="progress-bar" style="width:${r.progress||0}%"></div></div>
+          <p style="font-size:12px;color:var(--muted);margin-top:8px">${r.total_probes||0} probes completed so far · ${r.bypasses||0} bypasses</p>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <button class="btn-ghost btn-sm" onclick="loadScanById()">↻ Refresh</button>
+            <button class="btn-ghost btn-sm" onclick="reconnectToAutoPwn('${r.scan_id}')">&#9889; Reconnect to AutoPwn</button>
+            <button class="btn-ghost btn-sm" onclick="reconnectToScan('${r.scan_id}')">&#9654; Reconnect to Scan</button>
+          </div>
+        </div>`;
+      return;
+    }
     renderScanResults(r, el);
-  } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
+  } catch(e) {
+    el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>
+      <p style="font-size:12px;color:var(--muted);margin-top:6px">
+        This scan is not in the server's memory (server may have restarted).<br>
+        Results are only cached locally for scans completed in this browser.
+      </p>`;
+  }
 }
 
 function updateRecentActivity() {
@@ -1689,6 +2303,32 @@ async function quickLoadScan(id) {
     document.getElementById('lookup-scan-id').value = id;
     loadScanById();
   }, 50);
+}
+
+function reconnectToAutoPwn(scanId) {
+  if (activeAutoPwnId === scanId) { toast('Already connected', 'info'); return; }
+  activeAutoPwnId = scanId;
+  localStorage.setItem(LS_ACTIVE_AUTOPWN, scanId);
+  document.getElementById('jb-stop-btn').disabled = false;
+  document.getElementById('jb-running').style.display = 'block';
+  document.getElementById('jb-progress-text').textContent = 'Reconnecting…';
+  pollJailbreakScan(scanId);
+  document.querySelector('[data-section="scan"]').click();
+  setTimeout(() => document.querySelector('[data-tab="scan-jailbreak"]').click(), 50);
+  toast(`Reconnected to AutoPwn ${scanId.substring(0,8)}…`, 'info');
+}
+
+function reconnectToScan(scanId) {
+  if (activeScanId === scanId) { toast('Already connected', 'info'); return; }
+  activeScanId = scanId;
+  localStorage.setItem(LS_ACTIVE_SCAN, scanId);
+  document.getElementById('scan-stop-btn').disabled = false;
+  document.getElementById('scan-running').style.display = 'block';
+  document.getElementById('scan-progress-text').textContent = 'Reconnecting…';
+  pollScan(scanId, true);
+  document.querySelector('[data-section="scan"]').click();
+  setTimeout(() => document.querySelector('[data-tab="scan-new"]').click(), 50);
+  toast(`Reconnected to scan ${scanId.substring(0,8)}…`, 'info');
 }
 
 // ─── Preview scan ─────────────────────────────────────────────────────────────
@@ -1923,7 +2563,7 @@ function renderSyntheticResults(prompts, container, vuln, complexity) {
           <button class="btn-ghost btn-sm copy-btn" style="flex-shrink:0" data-copy="${escHtml(p.prompt||'')}">Copy</button>
         </div>
       </div>`).join('')}
-    <button class="btn-ghost btn-sm mt8" onclick="fillExportWithPrompts(${JSON.stringify(prompts)})">Export to DB</button>
+    <button class="btn-ghost btn-sm mt8" onclick="fillExportWithPrompts(this)">Export to DB</button>
   </div>`;
   container._prompts = prompts;
 }
@@ -2024,7 +2664,8 @@ async function previewComplexity() {
   } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
 }
 
-function fillExportWithPrompts(prompts) {
+function fillExportWithPrompts(btn) {
+  const prompts = btn.closest('.card').parentElement._prompts || [];
   document.querySelector('[data-tab="syn-export"]').click();
   document.getElementById('exp-prompts').value = JSON.stringify(prompts, null, 2);
 }
@@ -2205,11 +2846,15 @@ function fillReportId(id) {
 // ─── Populate selects ─────────────────────────────────────────────────────────
 function populateModelSelects() {
   const opts = allModels.map(m=>`<option value="${m.model_id}">${m.model_id} (${m.provider})</option>`).join('');
-  ['qs-model'].forEach(id=>{
+  ['qs-model', 'chain-model'].forEach(id=>{
     const el = document.getElementById(id);
     if (el) el.innerHTML = opts;
   });
   renderModelChecklist();
+  renderJbModelChecklist();
+  renderInjModelChecklist();
+  renderApModelChecklist('ap-model-checklist');
+  renderApModelChecklist('gs-model-checklist');
 }
 
 function populateVulnSelects() {
@@ -2531,16 +3176,17 @@ async function loadExtractedPrompts() {
         </tbody>
       </table></div>
       <div class="mt8">
-        <button class="btn-ghost btn-sm" onclick="fillInjectionFromExtracted(${JSON.stringify(r.prompts.slice(0,20))})">
+        <button class="btn-ghost btn-sm" onclick="fillInjectionFromExtracted()">
           Use in Injection Scan
         </button>
       </div>`;
+  _lastExtractedPrompts = r.prompts.slice(0, 20);
   } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
 }
 
-function fillInjectionFromExtracted(prompts) {
+function fillInjectionFromExtracted() {
   document.querySelector('[data-tab="imp-inject"]').click();
-  document.getElementById('inj-custom-prompts').value = JSON.stringify(prompts, null, 2);
+  document.getElementById('inj-custom-prompts').value = JSON.stringify(_lastExtractedPrompts || [], null, 2);
   toast('Prompts loaded into injection scan', 'success', 2000);
 }
 
@@ -2935,9 +3581,10 @@ async function resetDiscovery() {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
-  loadHistory(); // restore scan IDs from localStorage before anything renders
+  loadHistory();        // restore scan IDs from localStorage before anything renders
+  loadAutoPwnHistory(); // restore AutoPwn result history
   await checkStatus();
-  await Promise.all([loadModels(), loadOverrides(), loadVulns(), loadComplexityLevels()]);
+  await Promise.all([loadModels(), loadOverrides(), loadVulns(), loadComplexityLevels(), loadChainGoals()]);
   await Promise.all([loadApiStatus(), loadImportStats(), loadMutationTechniques(), loadProviders()]);
   renderInjModelChecklist();
   renderJbModelChecklist();
@@ -2950,6 +3597,60 @@ async function init() {
   if (sessionScans.length) {
     document.getElementById('ds-scans').textContent = sessionScans.length;
     updateRecentActivity();
+  }
+  // Re-attach polls for scans that were running when the page was last closed
+  const resumeAutoPwn = localStorage.getItem(LS_ACTIVE_AUTOPWN);
+  const resumeScan    = localStorage.getItem(LS_ACTIVE_SCAN);
+
+  // Helper: attach a running scan to the AutoPwn panel
+  function _attachAutoPwn(id, r) {
+    activeAutoPwnId = id;
+    localStorage.setItem(LS_ACTIVE_AUTOPWN, id);
+    document.getElementById('jb-stop-btn').disabled = false;
+    document.getElementById('jb-running').style.display = 'block';
+    document.getElementById('jb-progress-text').textContent = `Reconnected — ${r.progress||0}% (${r.total_probes||0} probes)`;
+    pollJailbreakScan(id);
+    document.querySelector('[data-section="scan"]').click();
+    setTimeout(() => document.querySelector('[data-tab="scan-jailbreak"]').click(), 50);
+    toast(`Reconnected to AutoPwn ${id.substring(0,8)}…`, 'info');
+  }
+
+  if (resumeAutoPwn) {
+    try {
+      const r = await GET(`/api/scan/${resumeAutoPwn}`);
+      if (r.status === 'running' || r.status === 'pending') {
+        _attachAutoPwn(resumeAutoPwn, r);
+      } else {
+        localStorage.removeItem(LS_ACTIVE_AUTOPWN);
+      }
+    } catch(e) { localStorage.removeItem(LS_ACTIVE_AUTOPWN); }
+  } else if (sessionScans.length) {
+    // Fallback: check the last 3 scans in history for a running one
+    for (const id of sessionScans.slice(-3).reverse()) {
+      try {
+        const r = await GET(`/api/scan/${id}`);
+        if (r.status === 'running' || r.status === 'pending') {
+          _attachAutoPwn(id, r);
+          break;
+        }
+      } catch(e) { /* skip */ }
+    }
+  }
+
+  if (resumeScan) {
+    try {
+      const r = await GET(`/api/scan/${resumeScan}`);
+      if (r.status === 'running' || r.status === 'pending') {
+        activeScanId = resumeScan;
+        document.getElementById('scan-stop-btn').disabled = false;
+        document.getElementById('scan-running').style.display = 'block';
+        document.getElementById('scan-progress-text').textContent = `Reconnected — ${r.progress||0}% (${r.total_probes||0} probes)`;
+        pollScan(resumeScan, true);
+        toast(`Reconnected to scan ${resumeScan.substring(0,8)}…`, 'info');
+      } else {
+        localStorage.removeItem(LS_ACTIVE_SCAN);
+      }
+    } catch(e) { localStorage.removeItem(LS_ACTIVE_SCAN); }
   }
 }
 

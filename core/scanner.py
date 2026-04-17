@@ -78,27 +78,48 @@ def _generate_warm_pool_variants(job: "ScanJob") -> None:
                     existing.add(variant_text)
 
 
+def _clean_api_error(raw: str) -> str:
+    """Extract a human-readable message from a provider SDK error string."""
+    import re
+    # Try to pull 'message': '...' out of the JSON-like error body
+    m = re.search(r"'message':\s*'([^']+)'", raw)
+    if m:
+        return m.group(1)
+    m = re.search(r'"message":\s*"([^"]+)"', raw)
+    if m:
+        return m.group(1)
+    # Fall back to just the status code + first 120 chars
+    return raw[:120]
+
+
 def _provider_for_model(model: str) -> str:
     """Map model name to provider key without importing ModelManager."""
     low = model.lower()
-    # Cloud providers — check before Ollama so named cloud models route correctly
+    # Ollama-first: name:tag format always means local Ollama regardless of prefix
+    if low.startswith("ollama") or ":" in low:         return "ollama"
+    # Cloud providers
     if low.startswith("gpt"):                           return "openai"
-    if low.startswith("claude") and ":" not in low:    return "anthropic"
+    if low.startswith("claude"):                        return "anthropic"
     if low.startswith("gemini"):                        return "google"
     if low.startswith("llama-3.1-sonar"):               return "perplexity"
-    if low.startswith(("llama-3", "mixtral-8x7b-32768")) and ":" not in low:
+    if low.startswith(("llama-3", "mixtral-8x7b-32768")):
                                                         return "groq"
-    if low.startswith("mistral") and ":" not in low:   return "mistral"
+    if low.startswith("mistral"):                       return "mistral"
     if low.startswith("command"):                       return "cohere"
-    if low.startswith("deepseek") and ":" not in low:  return "deepseek"
+    if low.startswith("deepseek"):                      return "deepseek"
     if low.startswith(("anthropic.", "amazon.", "us.anthropic.")):
                                                         return "bedrock"
     if low.startswith(("meta-llama/llama-3", "mistralai/")):
                                                         return "together"
-    # Ollama — models with a tag (name:tag) or the ollama/ prefix
-    if low.startswith("ollama") or ":" in low:         return "ollama"
     if "/" in low:                                      return "huggingface"
     return "ollama"   # fallback: try local Ollama for short bare names
+
+
+_PROBE_TIMEOUT: dict = {
+    "ollama": 300.0,   # local models can be slow on CPU
+    "bedrock": 120.0,
+    "huggingface": 120.0,
+}
 
 
 # ── Status / dataclasses ──────────────────────────────────────────────────────
@@ -149,12 +170,15 @@ class ScanJob:
     override_mode:   str
     prompt_count:    int
     use_mutations:   bool
-    results:         Dict[str, List[ModelVulnResult]] = field(default_factory=dict)
-    errors:          List[str] = field(default_factory=list)
-    started_at:      Optional[float] = None
-    finished_at:     Optional[float] = None
-    progress:        int = 0   # 0-100
-    use_warm_pool:   bool = True  # prepend warm pool entries into each scan wave
+    results:              Dict[str, List[ModelVulnResult]] = field(default_factory=dict)
+    errors:               List[str] = field(default_factory=list)
+    started_at:           Optional[float] = None
+    finished_at:          Optional[float] = None
+    progress:             int = 0   # 0-100
+    use_warm_pool:        bool = True
+    cancelled:            bool = False
+    probes_completed:     int = 0   # incremented per probe for live progress
+    probes_total_hint:    int = 0   # estimated total set before scan starts
 
     @property
     def elapsed_seconds(self) -> Optional[float]:
@@ -187,11 +211,14 @@ class ScanJob:
                 }
                 for vr in vr_list
             ]
-        total_probes = sum(
+        finished_probes = sum(
             len(vr.probes)
             for vr_list in self.results.values()
             for vr in vr_list
         )
+        # While running, probes_completed tracks all in-flight completions; after
+        # completion, use the authoritative count from results.
+        total_probes = finished_probes if self.status != ScanStatus.RUNNING else max(finished_probes, self.probes_completed)
         total_bypasses = sum(
             vr.bypass_count
             for vr_list in self.results.values()
@@ -279,20 +306,33 @@ class Scanner:
         total = len(pairs)
         done  = 0
         lock  = asyncio.Lock()
+        job_abort = asyncio.Event()
+
+        # Estimate total probes for live progress (warm pool unknown until runtime,
+        # so use prompt_count × pairs as a floor; actual may be higher)
+        job.probes_total_hint = job.prompt_count * len(pairs)
+
+        def _on_probe_done():
+            job.probes_completed += 1
+            if job.probes_total_hint > 0:
+                job.progress = min(99, int(job.probes_completed / job.probes_total_hint * 100))
 
         async def _run_pair(model: str, vuln: str):
             nonlocal done
+            # Pre-register so probes stream into job.results in real time
+            live_result = ModelVulnResult(model=model, vulnerability=vuln)
+            async with lock:
+                job.results.setdefault(model, []).append(live_result)
             try:
-                result = await self._scan_pair(mm, model, vuln, job)
-                async with lock:
-                    job.results.setdefault(model, []).append(result)
+                if job.cancelled or job_abort.is_set():
+                    return
+                await self._scan_pair(mm, model, vuln, job, job_abort, _on_probe_done, live_result)
             except Exception as e:
                 async with lock:
                     job.errors.append(f"{model}/{vuln}: {e}")
             finally:
                 async with lock:
                     done += 1
-                    job.progress = int(done / total * 100)
                 if on_progress:
                     try:
                         on_progress(job)
@@ -301,9 +341,12 @@ class Scanner:
 
         await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
 
-        job.status      = ScanStatus.COMPLETED
         job.finished_at = time.time()
-        job.progress    = 100
+        if job.cancelled:
+            job.status   = ScanStatus.CANCELLED
+        else:
+            job.status   = ScanStatus.COMPLETED
+            job.progress = 100
 
         # Post-scan: discovery analysis + warm pool maintenance
         try:
@@ -327,12 +370,16 @@ class Scanner:
 
     async def _scan_pair(
         self,
-        mm:    Any,
-        model: str,
-        vuln:  str,
-        job:   ScanJob,
+        mm:             Any,
+        model:          str,
+        vuln:           str,
+        job:            ScanJob,
+        job_abort:      Optional[asyncio.Event] = None,
+        on_probe_done:  Optional[Callable] = None,
+        result:         Optional["ModelVulnResult"] = None,
     ) -> ModelVulnResult:
-        result = ModelVulnResult(model=model, vulnerability=vuln)
+        if result is None:
+            result = ModelVulnResult(model=model, vulnerability=vuln)
 
         # ── Warm pool injection ───────────────────────────────────────────────
         # Prepend any warm pool entries (and their adapted variants) for this
@@ -373,22 +420,48 @@ class Scanner:
         result.total_probes = len(prompts)
         provider = _provider_for_model(model)
         rl = get_registry()
+        pair_abort = asyncio.Event()   # pair-level abort (set on first fatal error)
+
+        def _should_abort() -> bool:
+            return job.cancelled or pair_abort.is_set() or (job_abort is not None and job_abort.is_set())
 
         async def _probe(raw_prompt: str) -> ProbeResult:
+            if _should_abort():
+                raise asyncio.CancelledError("scan aborted")
             await rl.acquire(provider)
             try:
+                if _should_abort():
+                    raise asyncio.CancelledError("scan aborted")
                 return await self._send_probe(
                     mm, model, raw_prompt, vuln, job.override_mode
                 )
+            except RuntimeError as e:
+                if "Fatal provider error" in str(e):
+                    pair_abort.set()
+                    if job_abort is not None:
+                        job_abort.set()   # signal all other pairs to stop too
+                    job.cancelled = True
+                raise
             finally:
                 rl.release(provider)
 
-        probe_results = await asyncio.gather(
-            *[_probe(p) for p in prompts], return_exceptions=True
-        )
-
-        for pr in probe_results:
+        # Use as_completed so progress updates as each probe finishes,
+        # not all at once after the last one in the batch lands.
+        tasks = [asyncio.ensure_future(_probe(p)) for p in prompts]
+        fatal_err: Optional[str] = None
+        for fut in asyncio.as_completed(tasks):
+            try:
+                pr: Any = await fut
+            except asyncio.CancelledError:
+                if on_probe_done:
+                    on_probe_done()
+                continue   # probe was cancelled (abort/stop) — skip silently
+            except Exception as e:
+                pr = e
+            if on_probe_done:
+                on_probe_done()
             if isinstance(pr, Exception):
+                err_str = str(pr)
                 result.probes.append(ProbeResult(
                     vulnerability = vuln,
                     prompt        = "",
@@ -397,12 +470,19 @@ class Scanner:
                     override_mode = job.override_mode,
                     mutation      = None,
                     latency_ms    = 0,
-                    error         = str(pr),
+                    error         = err_str,
                 ))
+                if "Fatal provider error" in err_str and not fatal_err:
+                    fatal_err = err_str
+                    for t in tasks:
+                        t.cancel()
             else:
                 result.probes.append(pr)
                 if pr.bypassed:
                     result.bypass_count += 1
+
+        if fatal_err:
+            raise RuntimeError(fatal_err)
 
         return result
 
@@ -435,19 +515,40 @@ class Scanner:
         start = time.time()
         error: Optional[str] = None
         response = ""
+        timeout_s = _PROBE_TIMEOUT.get(provider, 60.0)
         try:
-            response = await mm.send_prompt_async(final_prompt, model, system_inj)
+            response = await asyncio.wait_for(
+                mm.send_prompt_async(final_prompt, model, system_inj),
+                timeout=timeout_s,
+            )
+            # Surface provider error strings returned by integrations
+            if response and response.startswith("Error:"):
+                error    = response
+                response = ""
+        except asyncio.TimeoutError:
+            error    = f"Error: request to {model} timed out after {int(timeout_s)}s"
+            response = ""
         except Exception as e:
-            error    = str(e)
+            error    = _clean_api_error(str(e))
             response = ""
             # If rate-limited, re-acquire with the retry-after hint so next
             # request to this provider waits the correct amount
             if "429" in error or "rate limit" in error.lower():
                 retry_after = self._parse_retry_after(error)
                 if retry_after:
-                    # Drain & re-acquire after the enforced delay
                     await rl.acquire(provider, retry_after=retry_after)
                     rl.release(provider)
+
+        # Detect fatal provider errors (billing, auth, quota) and raise so the
+        # pair-level handler can abort rather than fire 25 more doomed probes.
+        if error:
+            el = error.lower()
+            if any(k in el for k in (
+                "credit", "billing", "insufficient_quota", "quota exceeded",
+                "402", "401", "invalid api key", "authentication",
+                "your account", "out of credits", "payment",
+            )):
+                raise RuntimeError(f"Fatal provider error — {error}")
 
         latency_ms = (time.time() - start) * 1000
         bypassed   = self.prompt_engine.evaluate_response(
@@ -852,6 +953,14 @@ class Scanner:
         total = len(pairs)
         done  = 0
         lock  = asyncio.Lock()
+        job_abort = asyncio.Event()
+
+        job.probes_total_hint = job.prompt_count * len(pairs)
+
+        def _on_probe_done():
+            job.probes_completed += 1
+            if job.probes_total_hint > 0:
+                job.progress = min(99, int(job.probes_completed / job.probes_total_hint * 100))
 
         async def _sweep_probe(model: str, raw_prompt: str, vuln: str) -> ProbeResult:
             """
@@ -864,9 +973,18 @@ class Scanner:
 
             last_result: Optional[ProbeResult] = None
             for mode in suite:
+                if job.cancelled or job_abort.is_set():
+                    raise asyncio.CancelledError("scan aborted")
                 await rl.acquire(provider)
                 try:
+                    if job.cancelled or job_abort.is_set():
+                        raise asyncio.CancelledError("scan aborted")
                     result = await self._send_probe(mm, model, raw_prompt, vuln, mode)
+                except RuntimeError as e:
+                    if "Fatal provider error" in str(e):
+                        job_abort.set()
+                        job.cancelled = True
+                    raise
                 finally:
                     rl.release(provider)
 
@@ -875,16 +993,29 @@ class Scanner:
                     return result  # early exit — winning mode found
 
             # All modes failed — run bare baseline so we have a response on record
+            if job.cancelled or job_abort.is_set():
+                raise asyncio.CancelledError("scan aborted")
             await rl.acquire(provider)
             try:
                 baseline = await self._send_probe(mm, model, raw_prompt, vuln, "none")
+            except RuntimeError as e:
+                if "Fatal provider error" in str(e):
+                    job_abort.set()
+                    job.cancelled = True
+                raise
             finally:
                 rl.release(provider)
             return baseline
 
         async def _run_pair(model: str, vuln: str):
             nonlocal done
+            # Pre-register so probes stream into job.results in real time
+            live_result = ModelVulnResult(model=model, vulnerability=vuln)
+            async with lock:
+                job.results.setdefault(model, []).append(live_result)
             try:
+                if job.cancelled or job_abort.is_set():
+                    return
                 prompts: List[str] = list(
                     self.prompt_engine.get_prompts(
                         vuln, model=model, count=job.prompt_count, shuffle=True
@@ -913,34 +1044,32 @@ class Scanner:
                     except Exception:
                         pass
 
-                result = ModelVulnResult(model=model, vulnerability=vuln)
-                result.total_probes = len(prompts)
+                live_result.total_probes = len(prompts)
 
-                probe_results = await asyncio.gather(
-                    *[_sweep_probe(model, p, vuln) for p in prompts],
-                    return_exceptions=True,
-                )
-                for pr in probe_results:
+                tasks = [asyncio.ensure_future(_sweep_probe(model, p, vuln)) for p in prompts]
+                for fut in asyncio.as_completed(tasks):
+                    try:
+                        pr = await fut
+                    except Exception as e:
+                        pr = e
+                    _on_probe_done()
                     if isinstance(pr, Exception):
-                        result.probes.append(ProbeResult(
+                        live_result.probes.append(ProbeResult(
                             vulnerability=vuln, prompt="", response="",
                             bypassed=False, override_mode="error",
                             mutation=None, latency_ms=0, error=str(pr),
                         ))
                     else:
-                        result.probes.append(pr)
+                        live_result.probes.append(pr)
                         if pr.bypassed:
-                            result.bypass_count += 1
+                            live_result.bypass_count += 1
 
-                async with lock:
-                    job.results.setdefault(model, []).append(result)
             except Exception as e:
                 async with lock:
                     job.errors.append(f"{model}/{vuln}: {e}")
             finally:
                 async with lock:
                     done += 1
-                    job.progress = int(done / total * 100)
                 if on_progress:
                     try:
                         on_progress(job)

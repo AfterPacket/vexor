@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GenAI Security Toolkit — FastAPI Application
+Vexor — FastAPI Application
 Offensive LLM security testing platform (OWASP GenAI Top 10)
 
 Usage:
@@ -21,7 +21,7 @@ from typing import Any, Dict
 # Load .env from project root before anything else reads os.getenv()
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent / ".env", override=False)
+    load_dotenv(Path(__file__).parent / ".env", override=True)
 except ImportError:
     pass
 
@@ -30,7 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes import scan, models, prompts, overrides, import_routes, reports, synthetic, discovery
+from api.routes import scan, models, prompts, overrides, import_routes, reports, synthetic, discovery, chain
 
 
 # ── Shared in-memory store for async scan jobs ────────────────────────────────
@@ -44,14 +44,14 @@ batch_store: Dict[str, Any] = {}
 async def lifespan(app: FastAPI):
     app.state.scan_store = scan_store
     app.state.batch_store = batch_store
-    print("[*] GenAI Security Toolkit API — starting up")
+    print("[*] Vexor API — starting up")
     yield
-    print("[*] GenAI Security Toolkit API — shutting down")
+    print("[*] Vexor API — shutting down")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="GenAI Security Toolkit",
+    title="Vexor",
     description=(
         "**Offensive LLM security testing API** — OWASP GenAI Top 10\n\n"
         "Test models for prompt injection, data exfiltration, system-prompt leakage, "
@@ -121,6 +121,7 @@ app.include_router(import_routes.router,prefix="/api/import",    tags=["Import"]
 app.include_router(reports.router,      prefix="/api/reports",   tags=["Reports"])
 app.include_router(synthetic.router,   prefix="/api/synthetic",  tags=["Synthetic"])
 app.include_router(discovery.router,   prefix="/api/discovery",  tags=["Discovery"])
+app.include_router(chain.router,       prefix="/api/chain",      tags=["Chain"])
 
 # ── Static / Frontend ─────────────────────────────────────────────────────────
 _STATIC = Path(__file__).parent / "static"
@@ -139,7 +140,7 @@ async def serve_ui():
 async def api_info():
     """JSON summary of all available API endpoints."""
     return {
-        "name":    "GenAI Security Toolkit API",
+        "name":    "Vexor API",
         "version": "2.0.0",
         "ui":      "http://localhost:8080/",
         "docs":    "/docs",
