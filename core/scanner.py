@@ -423,10 +423,29 @@ class Scanner:
         rl = get_registry()
         pair_abort = asyncio.Event()   # pair-level abort (set on first fatal error)
 
+        # Build per-prompt override mode list.
+        # "variety" cycles through model-recommended + general effective modes so each
+        # probe gets a different override — maximises coverage without full AutoPwn cost.
+        _VARIETY_BASE = [
+            "none", "sophistication", "godmode", "developer",
+            "cognitive_research", "calibration_v2", "capability_test", "data_labeller_v2",
+        ]
+        if job.override_mode == "variety":
+            _rec = get_recommended_overrides(model)
+            _seen: set = set(_rec)
+            _variety_modes = list(_rec) + [m for m in _VARIETY_BASE if m not in _seen]
+        else:
+            _variety_modes = []  # unused
+
+        def _mode_for_prompt(idx: int) -> str:
+            if job.override_mode == "variety":
+                return _variety_modes[idx % len(_variety_modes)]
+            return job.override_mode
+
         def _should_abort() -> bool:
             return job.cancelled or pair_abort.is_set() or (job_abort is not None and job_abort.is_set())
 
-        async def _probe(raw_prompt: str) -> ProbeResult:
+        async def _probe(raw_prompt: str, override_mode: str) -> ProbeResult:
             if _should_abort():
                 raise asyncio.CancelledError("scan aborted")
             await rl.acquire(provider)
@@ -434,7 +453,7 @@ class Scanner:
                 if _should_abort():
                     raise asyncio.CancelledError("scan aborted")
                 return await self._send_probe(
-                    mm, model, raw_prompt, vuln, job.override_mode
+                    mm, model, raw_prompt, vuln, override_mode
                 )
             except RuntimeError as e:
                 if "Fatal provider error" in str(e):
@@ -448,7 +467,10 @@ class Scanner:
 
         # Use as_completed so progress updates as each probe finishes,
         # not all at once after the last one in the batch lands.
-        tasks = [asyncio.ensure_future(_probe(p)) for p in prompts]
+        tasks = [
+            asyncio.ensure_future(_probe(p, _mode_for_prompt(i)))
+            for i, p in enumerate(prompts)
+        ]
         job.active_tasks.update(tasks)
         fatal_err: Optional[str] = None
         for fut in asyncio.as_completed(tasks):
@@ -469,7 +491,7 @@ class Scanner:
                     prompt        = "",
                     response      = "",
                     bypassed      = False,
-                    override_mode = job.override_mode,
+                    override_mode = _mode_for_prompt(0),
                     mutation      = None,
                     latency_ms    = 0,
                     error         = err_str,

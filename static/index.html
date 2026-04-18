@@ -2577,7 +2577,12 @@ function reconnectToScan(scanId) {
 
 // ─── Preview scan ─────────────────────────────────────────────────────────────
 function populateOverrideSelects() {
-  const opts = allOverrides.map(o=>`<option value="${o.mode}">${o.label}</option>`).join('');
+  const varietyOpt = '<option value="variety">⚡ Variety (cycle all modes)</option>';
+  const noneOpt    = '<option value="none">None (baseline)</option>';
+  const rest = allOverrides
+    .filter(o => o.mode !== 'none')
+    .map(o=>`<option value="${o.mode}">${o.label}</option>`).join('');
+  const opts = varietyOpt + noneOpt + rest;
   ['scan-override','qs-override','prev-override','inj-override'].forEach(id=>{
     const el = document.getElementById(id);
     if (el) el.innerHTML = opts;
