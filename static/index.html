@@ -2441,7 +2441,7 @@ function renderScanResults(r, container, autoExpand=false) {
                   ${p.override_mode&&p.override_mode!=='none'?`<span class="badge badge-purple" style="margin-bottom:4px">${escHtml(p.override_mode)}</span>`:''}
                   ${hasWrap?`
                     <div style="margin-bottom:4px">
-                      <button class="btn-ghost btn-sm" style="font-size:10px;padding:2px 7px" onclick="toggleEl('${uid}-wrap',this,'Hide full prompt','Show full prompt sent to model')">Show full prompt sent to model</button>
+                      <button class="btn-ghost btn-sm" style="font-size:10px;padding:2px 7px" onclick="toggleEl(event,'${uid}-wrap',this,'Hide full prompt','Show full prompt sent to model')">Show full prompt sent to model</button>
                       <div id="${uid}-wrap" style="display:none;margin-top:4px;font-size:11px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;word-break:break-all;white-space:pre-wrap">${escHtml(p.wrapped_prompt||'')}</div>
                     </div>`:''}
                   ${p.response?`<div style="font-size:12px;background:var(--bg3);padding:6px 8px;border-radius:4px;margin-top:4px;word-break:break-all;white-space:pre-wrap">${escHtml(p.response||'')}</div>`:''}
@@ -2463,8 +2463,8 @@ function toggleResultCard(el) {
   el.classList.toggle('open');
 }
 
-function toggleEl(id, btn, labelHide, labelShow) {
-  if (window.event) window.event.stopPropagation();
+function toggleEl(evt, id, btn, labelHide, labelShow) {
+  if (evt && evt.stopPropagation) evt.stopPropagation();
   const el = document.getElementById(id);
   if (!el) return;
   const hidden = el.style.display === 'none';
