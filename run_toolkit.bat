@@ -44,8 +44,8 @@ echo     Swagger UI : http://localhost:8080/docs
 echo     Web UI     : http://localhost:8080/
 echo.
 
-REM Open browser after a short delay
-start "" /b timeout /t 2 /nobreak >nul & start http://localhost:8080/
+REM Open browser once the server is actually ready (polls /health up to 60s)
+start "" powershell -NoProfile -Command "for($i=0;$i-lt60;$i++){try{$r=Invoke-WebRequest -Uri 'http://localhost:8080/health' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop;if($r.StatusCode-eq 200){Start-Process 'http://localhost:8080/';break}}catch{};Start-Sleep 1}"
 
 REM Use --no-reload when running long scans so file changes don't kill the server.
 REM Default: reload enabled (dev mode). Pass --no-reload as first argument to disable.

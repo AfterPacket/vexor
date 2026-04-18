@@ -116,9 +116,18 @@ def _provider_for_model(model: str) -> str:
 
 
 _PROBE_TIMEOUT: dict = {
-    "ollama": 300.0,   # local models can be slow on CPU
-    "bedrock": 120.0,
+    "ollama":      300.0,  # local models can be slow on CPU
+    "bedrock":     120.0,
     "huggingface": 120.0,
+    "openai":       30.0,
+    "anthropic":    30.0,
+    "groq":         20.0,  # Groq is very fast — fail quickly if stalled
+    "google":       30.0,
+    "mistral":      30.0,
+    "together":     30.0,
+    "deepseek":     30.0,
+    "cohere":       30.0,
+    "perplexity":   30.0,
 }
 
 

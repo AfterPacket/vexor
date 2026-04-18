@@ -38,6 +38,15 @@ echo "    Swagger UI : http://localhost:8080/docs"
 echo "    Web UI     : http://localhost:8080/"
 echo
 
+# Open browser once server is ready (polls /health up to 60s)
+(i=0; while [ $i -lt 60 ]; do
+  curl -sf http://localhost:8080/health >/dev/null 2>&1 && {
+    xdg-open http://localhost:8080 2>/dev/null || open http://localhost:8080 2>/dev/null || true
+    break
+  }
+  sleep 1; i=$((i+1))
+done) &
+
 # Use --no-reload when running long scans so file changes don't kill the server.
 # Default: reload enabled (dev mode). Pass --no-reload as first argument to disable.
 if [ "${1}" = "--no-reload" ]; then
