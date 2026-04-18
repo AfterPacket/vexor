@@ -42,9 +42,24 @@ batch_store: Dict[str, Any] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.scan_store = scan_store
+    app.state.scan_store  = scan_store
     app.state.batch_store = batch_store
-    print("[*] Vexor API — starting up")
+    from api.routes.scan import load_all_scans_from_disk
+    n = load_all_scans_from_disk(scan_store)
+    print(f"[*] Vexor API — starting up  (loaded {n} persisted scan(s))")
+
+    # Pre-warm ModelManager and all vulnerability modules so the first scan
+    # request doesn't block on provider client initialization.
+    try:
+        from api.routes.scan import _scanner
+        from core.prompt_engine import ALL_VULNS
+        _scanner._get_mm()
+        for v in ALL_VULNS:
+            _scanner.prompt_engine.load_module(v)
+        print("[*] ModelManager + vuln modules pre-warmed")
+    except Exception as e:
+        print(f"[!] Pre-warm failed (non-fatal): {e}")
+
     yield
     print("[*] Vexor API — shutting down")
 
