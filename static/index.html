@@ -2464,6 +2464,7 @@ function toggleResultCard(el) {
 }
 
 function toggleEl(id, btn, labelHide, labelShow) {
+  if (window.event) window.event.stopPropagation();
   const el = document.getElementById(id);
   if (!el) return;
   const hidden = el.style.display === 'none';
