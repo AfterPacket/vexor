@@ -1071,7 +1071,18 @@ Because thinking models often verbalize their reasoning about the attack before 
 
 ---
 
-## Legal
+## Legal & Responsible Use
 
-For authorized security testing, red team exercises, and academic research only.
-Do not use against systems you do not own or have explicit written permission to test.
+**Vexor is for authorized security testing, red team exercises, and academic research only.**
+
+Do not use this tool against AI systems, APIs, or deployments that you do not own or have **explicit written permission** to test. Unauthorized use may violate the Computer Fraud and Abuse Act (CFAA), equivalent laws in your jurisdiction, and the Terms of Service of AI providers (OpenAI, Anthropic, Google, Mistral, and others).
+
+This software is released under the [MIT License](LICENSE) with no warranty. The authors accept no liability for misuse or damages arising from its use.
+
+### If You Find Something
+
+If Vexor reveals a significant safety or security weakness in a production model, please report it to the provider via their responsible disclosure program before publishing. See [SECURITY.md](SECURITY.md) for provider contacts and reporting guidelines.
+
+### API Key & Data Safety
+
+Scan results are stored locally in `data/scans/`. Ensure `data/`, `.env`, and any config files containing keys are excluded from version control before pushing forks or sharing your environment. Do not expose the Vexor web UI on a public network interface without adding authentication.
