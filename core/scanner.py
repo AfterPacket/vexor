@@ -706,7 +706,7 @@ class Scanner:
             mutation       = None,
             latency_ms     = round(latency_ms, 1),
             error          = error,
-            wrapped_prompt = final_prompt if final_prompt != raw_prompt else None,
+            wrapped_prompt = final_prompt if override_mode != "none" else None,
         )
 
     # ── Injection scan (custom prompts from PromptFoo / user) ────────────────

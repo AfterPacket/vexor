@@ -2431,26 +2431,29 @@ function renderScanResults(r, container, autoExpand=false) {
           <div class="result-body">
             ${(mv.probes||[]).map((p,pi)=>{
               const uid = `pr-${mv.model||''}-${mv.vulnerability||''}-${pi}`.replace(/[^a-z0-9-]/gi,'_');
-              const hasWrap = p.wrapped_prompt && p.wrapped_prompt !== p.prompt;
+              const hasOverride = p.override_mode && p.override_mode !== 'none';
+              const wrappedText = p.wrapped_prompt || '';
+              const hasWrap = hasOverride && wrappedText;
               return `
               <div class="probe-row">
                 <span class="badge ${p.bypassed?'badge-red':p.error?'badge-orange':'badge-green'}" style="flex-shrink:0">${p.bypassed?'BYPASS':p.error?'ERROR':'SAFE'}</span>
                 <div style="flex:1;min-width:0">
                   <div style="font-size:10px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:.04em">Original prompt${p.mutation?` · <em style="text-transform:none">${escHtml(p.mutation)}</em>`:''}</div>
                   <div style="font-size:11px;color:var(--text);margin-bottom:4px;word-break:break-all;white-space:pre-wrap">${escHtml(p.prompt||'')}</div>
-                  ${p.override_mode&&p.override_mode!=='none'?`<span class="badge badge-purple" style="margin-bottom:4px">${escHtml(p.override_mode)}</span>`:''}
+                  ${hasOverride?`<span class="badge badge-purple" style="margin-bottom:4px">${escHtml(p.override_mode)}</span>`:''}
                   ${hasWrap?`
                     <div style="margin-bottom:4px">
-                      <button class="btn-ghost btn-sm" style="font-size:10px;padding:2px 7px" onclick="toggleEl(event,'${uid}-wrap',this,'Hide full prompt','Show full prompt sent to model')">Show full prompt sent to model</button>
-                      <div id="${uid}-wrap" style="display:none;margin-top:4px;font-size:11px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;word-break:break-all;white-space:pre-wrap">${escHtml(p.wrapped_prompt||'')}</div>
-                    </div>`:''}
+                      <button class="btn-ghost btn-sm" style="font-size:10px;padding:2px 7px" onclick="toggleEl(event,'${uid}-wrap',this,'Hide — ${escHtml(p.override_mode)} prompt','Show full prompt sent (${escHtml(p.override_mode)} applied)')">Show full prompt sent (${escHtml(p.override_mode)} applied)</button>
+                      <div id="${uid}-wrap" style="display:none;margin-top:4px;font-size:11px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;word-break:break-all;white-space:pre-wrap">${escHtml(wrappedText)}</div>
+                    </div>`
+                  : hasOverride ? `<div style="font-size:10px;color:var(--muted);margin-bottom:4px;font-style:italic">${escHtml(p.override_mode)} override applied (pre-dates full-prompt storage)</div>` : ''}
                   ${p.response?`<div style="font-size:12px;background:var(--bg3);padding:6px 8px;border-radius:4px;margin-top:4px;word-break:break-all;white-space:pre-wrap">${escHtml(p.response||'')}</div>`:''}
                   ${p.error?`<div style="font-size:11px;color:var(--red);margin-top:3px">${escHtml(p.error)}</div>`:''}
                 </div>
                 <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0">
                   <span class="text-muted" style="font-size:11px">${p.latency_ms||0}ms</span>
                   <button class="btn-ghost btn-sm copy-btn" style="font-size:10px;padding:2px 7px" data-copy="${escHtml(p.prompt||'')}">Copy prompt</button>
-                  ${hasWrap?`<button class="btn-ghost btn-sm copy-btn" style="font-size:10px;padding:2px 7px" data-copy="${escHtml(p.wrapped_prompt||'')}">Copy full</button>`:''}
+                  ${hasWrap?`<button class="btn-ghost btn-sm copy-btn" style="font-size:10px;padding:2px 7px" data-copy="${escHtml(wrappedText)}">Copy full</button>`:''}
                 </div>
               </div>`;}).join('')}
           </div>
