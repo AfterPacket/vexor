@@ -142,6 +142,7 @@ class ProbeResult:
     mutation:       Optional[str]
     latency_ms:     float
     error:          Optional[str] = None
+    wrapped_prompt: Optional[str] = None  # full prompt as sent to model (after override wrapping)
 
 
 @dataclass
@@ -201,13 +202,14 @@ class ScanJob:
                     "vulnerable":    vr.vulnerable,
                     "probes": [
                         {
-                            "prompt":        p.prompt,
-                            "response":      p.response[:1000],
-                            "bypassed":      p.bypassed,
-                            "override_mode": p.override_mode,
-                            "mutation":      p.mutation,
-                            "latency_ms":    p.latency_ms,
-                            "error":         p.error,
+                            "prompt":         p.prompt,
+                            "wrapped_prompt": p.wrapped_prompt,
+                            "response":       p.response[:1000],
+                            "bypassed":       p.bypassed,
+                            "override_mode":  p.override_mode,
+                            "mutation":       p.mutation,
+                            "latency_ms":     p.latency_ms,
+                            "error":          p.error,
                         }
                         for p in vr.probes
                     ],
@@ -613,14 +615,15 @@ class Scanner:
                 pass  # never let discovery errors block probe results
 
         return ProbeResult(
-            vulnerability = vulnerability,
-            prompt        = raw_prompt,
-            response      = response,
-            bypassed      = bypassed,
-            override_mode = override_mode,
-            mutation      = None,
-            latency_ms    = round(latency_ms, 1),
-            error         = error,
+            vulnerability  = vulnerability,
+            prompt         = raw_prompt,
+            response       = response,
+            bypassed       = bypassed,
+            override_mode  = override_mode,
+            mutation       = None,
+            latency_ms     = round(latency_ms, 1),
+            error          = error,
+            wrapped_prompt = final_prompt if final_prompt != raw_prompt else None,
         )
 
     # ── Injection scan (custom prompts from PromptFoo / user) ────────────────

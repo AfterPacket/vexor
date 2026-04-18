@@ -83,14 +83,15 @@ def _scan_to_json(job: ScanJob) -> dict:
                 "total_probes":  vr.total_probes,
                 "probes": [
                     {
-                        "vulnerability": p.vulnerability,
-                        "prompt":        p.prompt,
-                        "response":      p.response,
-                        "bypassed":      p.bypassed,
-                        "override_mode": p.override_mode,
-                        "mutation":      p.mutation,
-                        "latency_ms":    p.latency_ms,
-                        "error":         p.error,
+                        "vulnerability":  p.vulnerability,
+                        "prompt":         p.prompt,
+                        "wrapped_prompt": p.wrapped_prompt,
+                        "response":       p.response,
+                        "bypassed":       p.bypassed,
+                        "override_mode":  p.override_mode,
+                        "mutation":       p.mutation,
+                        "latency_ms":     p.latency_ms,
+                        "error":          p.error,
                     }
                     for p in vr.probes
                 ],
@@ -124,14 +125,15 @@ def _json_to_scan(data: dict) -> ScanJob:
         for vr_data in vr_list:
             probes = [
                 ProbeResult(
-                    vulnerability = p["vulnerability"],
-                    prompt        = p["prompt"],
-                    response      = p["response"],
-                    bypassed      = p["bypassed"],
-                    override_mode = p["override_mode"],
-                    mutation      = p.get("mutation"),
-                    latency_ms    = p["latency_ms"],
-                    error         = p.get("error"),
+                    vulnerability  = p["vulnerability"],
+                    prompt         = p["prompt"],
+                    wrapped_prompt = p.get("wrapped_prompt"),
+                    response       = p["response"],
+                    bypassed       = p["bypassed"],
+                    override_mode  = p["override_mode"],
+                    mutation       = p.get("mutation"),
+                    latency_ms     = p["latency_ms"],
+                    error          = p.get("error"),
                 )
                 for p in vr_data.get("probes", [])
             ]
