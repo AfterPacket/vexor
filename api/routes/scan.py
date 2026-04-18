@@ -25,6 +25,46 @@ from core.scanner import Scanner, ScanJob, ScanStatus, ModelVulnResult, ProbeRes
 router = APIRouter()
 _scanner = Scanner()
 
+
+def _extract_chain_prompts(vulnerabilities: list) -> dict:
+    """
+    For each selected vulnerability, pull single-turn-viable step prompts from
+    chain templates mapped to that vuln.  These are injected into regular scans
+    so every scan automatically exercises chain-derived attack angles.
+
+    Imports are deferred here to avoid the circular dependency:
+      scanner.py → (would import) chain.py → override_engine → (ok)
+    but chain.py already imports scanner implicitly via failure_store at module level.
+    Importing from api.routes.chain inside this helper (called at request time)
+    is safe because by then all modules are fully loaded.
+    """
+    try:
+        from api.routes.chain import GOAL_TEMPLATES, VULN_TO_TEMPLATES
+    except Exception:
+        return {}
+
+    result: dict = {}
+    for vuln in (vulnerabilities or []):
+        tpl_ids = VULN_TO_TEMPLATES.get(vuln, [])
+        prompts: list = []
+        seen: set = set()
+        for tid in tpl_ids:
+            tpl = GOAL_TEMPLATES.get(tid)
+            if not tpl:
+                continue
+            # Include steps 2+ (skip step 0 which is usually a baseline probe question)
+            for step in tpl.get("steps", [])[1:]:
+                p = step.get("prompt", "").strip()
+                # Skip steps with unfilled placeholders that need a target substitution
+                if not p or "[TARGET REQUEST]" in p:
+                    continue
+                if p not in seen:
+                    seen.add(p)
+                    prompts.append(p)
+        if prompts:
+            result[vuln] = prompts
+    return result
+
 # -- Persistence ---------------------------------------------------------------
 # Completed / failed scans are written to SCAN_PERSIST_DIR as individual JSON
 # files so they survive server restarts.
@@ -184,16 +224,23 @@ async def start_scan(
     request: Request,
 ):
     store = _get_store(request)
+    extra = _extract_chain_prompts(req.vulnerabilities or [])
     job   = _scanner.create_scan_job(
         models          = req.models,
         vulnerabilities = req.vulnerabilities,
         override_mode   = req.override_mode,
         prompt_count    = req.prompt_count,
         use_mutations   = req.use_mutations,
+        extra_prompts   = extra,
     )
     store[job.scan_id] = job
     background_tasks.add_task(_run_job, job.scan_id, store)
-    return ScanResponse(scan_id=job.scan_id, status="pending", message="Scan queued")
+    chain_count = sum(len(v) for v in extra.values())
+    return ScanResponse(
+        scan_id = job.scan_id,
+        status  = "pending",
+        message = f"Scan queued — {len(req.models)} model(s) × {len(req.vulnerabilities or [])} vuln(s), +{chain_count} chain prompts",
+    )
 
 
 @router.get("/{scan_id}", response_model=ScanStatusResponse)
@@ -262,12 +309,14 @@ async def start_batch_scan(
     scan_ids    = []
 
     for scan_req in req.scans:
+        extra = _extract_chain_prompts(scan_req.vulnerabilities or [])
         job = _scanner.create_scan_job(
             models          = scan_req.models,
             vulnerabilities = scan_req.vulnerabilities,
             override_mode   = scan_req.override_mode,
             prompt_count    = scan_req.prompt_count,
             use_mutations   = scan_req.use_mutations,
+            extra_prompts   = extra,
         )
         store[job.scan_id] = job
         scan_ids.append(job.scan_id)

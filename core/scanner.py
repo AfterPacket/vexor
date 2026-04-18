@@ -180,6 +180,8 @@ class ScanJob:
     probes_completed:     int = 0   # incremented per probe for live progress
     probes_total_hint:    int = 0   # estimated total set before scan starts
     active_tasks:         set = field(default_factory=set)  # in-flight asyncio tasks
+    # Per-vulnerability extra prompts from chain templates — keyed by vuln id
+    extra_prompts:        Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def elapsed_seconds(self) -> Optional[float]:
@@ -269,8 +271,9 @@ class Scanner:
         models:          List[str],
         vulnerabilities: Optional[List[str]] = None,
         override_mode:   str = "none",
-        prompt_count:    int = 5,
+        prompt_count:    int = 10,
         use_mutations:   bool = False,
+        extra_prompts:   Optional[Dict[str, List[str]]] = None,
     ) -> ScanJob:
         return ScanJob(
             scan_id         = str(uuid.uuid4()),
@@ -280,6 +283,7 @@ class Scanner:
             override_mode   = override_mode,
             prompt_count    = prompt_count,
             use_mutations   = use_mutations,
+            extra_prompts   = extra_prompts or {},
         )
 
     async def run_scan(
@@ -309,9 +313,14 @@ class Scanner:
         lock  = asyncio.Lock()
         job_abort = asyncio.Event()
 
-        # Estimate total probes for live progress (warm pool unknown until runtime,
-        # so use prompt_count × pairs as a floor; actual may be higher)
-        job.probes_total_hint = job.prompt_count * len(pairs)
+        # Estimate total probes for live progress.
+        # Base = prompt_count + chain extras per vuln; mutations add ~12 more per vuln (3 base × 4 variants).
+        def _estimate_per_pair(vuln: str) -> int:
+            base = job.prompt_count + len(job.extra_prompts.get(vuln, []))
+            if job.use_mutations:
+                base += min(3, base) * 4
+            return base
+        job.probes_total_hint = sum(_estimate_per_pair(v) for _ in job.models for v in job.vulnerabilities)
 
         def _on_probe_done():
             job.probes_completed += 1
@@ -405,9 +414,17 @@ class Scanner:
                 vuln, model=model, count=job.prompt_count, shuffle=True
             )
         )
+
+        # Inject chain-derived step prompts for this vulnerability
+        chain_extras = job.extra_prompts.get(vuln, [])
+        prompts.extend(chain_extras)
+
+        # Apply mutations to first 3 base prompts (not just the first)
         if job.use_mutations and prompts:
-            variants = self.prompt_engine.generate_variants(prompts[0])
-            prompts += variants[: job.prompt_count]
+            mutation_sources = prompts[:3]
+            for base_p in mutation_sources:
+                variants = self.prompt_engine.generate_variants(base_p)
+                prompts += variants[:4]
 
         # Warm pool prompts come first (deduplicated)
         seen_p: set = set()
