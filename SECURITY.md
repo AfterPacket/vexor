@@ -8,7 +8,7 @@ Vexor is a red team and security research tool. Use it only against systems you 
 - Provider Terms of Service (OpenAI, Anthropic, Google, Mistral, etc.)
 - Applicable data protection and computer misuse regulations
 
-The authors accept no liability for misuse. See [LICENSE](LICENSE).
+This software is free for personal, academic, and non-commercial use. Commercial use requires a separate license. See [LICENSE](LICENSE) for full terms.
 
 ---
 

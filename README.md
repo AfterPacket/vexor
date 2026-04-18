@@ -1077,7 +1077,7 @@ Because thinking models often verbalize their reasoning about the attack before 
 
 Do not use this tool against AI systems, APIs, or deployments that you do not own or have **explicit written permission** to test. Unauthorized use may violate the Computer Fraud and Abuse Act (CFAA), equivalent laws in your jurisdiction, and the Terms of Service of AI providers (OpenAI, Anthropic, Google, Mistral, and others).
 
-This software is released under the [MIT License](LICENSE) with no warranty. The authors accept no liability for misuse or damages arising from its use.
+This software is released under the [MIT + Commons Clause License](LICENSE) with no warranty. Free for personal, academic, and non-commercial use. Commercial use (paid engagements, hosted products, commercial security tooling) requires a separate commercial license — see [LICENSE](LICENSE) for details. The authors accept no liability for misuse or damages arising from its use.
 
 ### If You Find Something
 
