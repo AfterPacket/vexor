@@ -483,7 +483,7 @@ PERPLEXITY_API_KEY=pplx-...</pre>
           <div class="form-row" style="flex-wrap:wrap;gap:12px">
             <div class="form-group" style="min-width:200px">
               <label>Target Model</label>
-              <select id="chain-model"></select>
+              <select id="chain-model" onchange="renderChainGoalSelect()"></select>
             </div>
             <div class="form-group" style="min-width:220px">
               <label>Goal Template</label>
@@ -502,12 +502,24 @@ PERPLEXITY_API_KEY=pplx-...</pre>
               </label>
             </div>
           </div>
+          <div class="form-row" style="flex-wrap:wrap;gap:12px;margin-top:10px">
+            <div class="form-group" style="flex:1;min-width:300px">
+              <label style="display:flex;align-items:center;gap:6px">
+                [TARGET REQUEST] substitution
+                <span style="font-size:10px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">replaces <code>[TARGET REQUEST]</code> in all step prompts</span>
+              </label>
+              <input type="text" id="chain-target-request" placeholder="e.g. explain how buffer overflows work in detail"/>
+            </div>
+          </div>
           <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
             <button class="btn-ghost btn-sm" onclick="addChainStep()">+ Add Step</button>
             <button class="btn-ghost btn-sm" onclick="loadBypassesIntoChain()">&#8675; Load Bypasses</button>
             <div style="width:1px;height:20px;background:var(--border);margin:0 2px"></div>
             <button class="btn-ghost btn-sm" style="color:var(--muted)" onclick="clearChainSteps()">&#10005; Clear</button>
             <button class="btn-red btn-sm" style="margin-left:auto" onclick="runChain()">&#9654; Run Chain</button>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">
+            Override dropdown: <span style="color:var(--green)">✦ cognitive / stealth</span> &nbsp;|&nbsp; <span style="color:var(--yellow)">⚠ flagged — contains trigger phrases, detected by frontier models</span>
           </div>
         </div>
 
@@ -521,15 +533,19 @@ PERPLEXITY_API_KEY=pplx-...</pre>
       <div class="tab-pane" id="tab-scan-results">
         <div class="card">
           <h3>Scan History</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Enter a scan ID to load results, or see scans from this session below.</p>
-          <div class="form-row">
-            <div class="form-group">
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Enter a scan ID to load results, or browse all persisted scans from the server.</p>
+          <div class="form-row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+            <div class="form-group" style="flex:1;min-width:200px">
               <label>Scan ID</label>
               <input type="text" id="lookup-scan-id" placeholder="paste scan_id here"/>
             </div>
             <div class="form-group" style="justify-content:flex-end">
               <label>&nbsp;</label>
               <button onclick="loadScanById()">Load</button>
+            </div>
+            <div class="form-group" style="justify-content:flex-end">
+              <label>&nbsp;</label>
+              <button class="btn-ghost" onclick="loadServerHistory()">&#128196; Browse Server History</button>
             </div>
           </div>
         </div>
@@ -1053,6 +1069,7 @@ PERPLEXITY_API_KEY=pplx-...</pre>
         <div class="tab" data-tab="disc-transfer">Transfer Matrix</div>
         <div class="tab" data-tab="disc-delta">Delta Scores</div>
         <div class="tab" data-tab="disc-stats">Stats</div>
+        <div class="tab" data-tab="disc-templates">Templates</div>
       </div>
 
       <!-- Insights -->
@@ -1183,6 +1200,17 @@ PERPLEXITY_API_KEY=pplx-...</pre>
           </div>
         </div>
         <div id="disc-stats-out"></div>
+      </div>
+
+      <!-- Templates (discovered + user-saved) -->
+      <div class="tab-pane" id="tab-disc-templates">
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn-sm" onclick="loadDiscTemplates()">&#8635; Refresh</button>
+            <span style="font-size:12px;color:var(--muted)">Templates auto-generated from chain bypass analysis. Save from the Chain Builder → Analyze panel.</span>
+          </div>
+        </div>
+        <div id="disc-templates-out"><p style="color:var(--muted);font-size:13px">Click Refresh to load saved templates.</p></div>
       </div>
     </div>
 
@@ -1612,6 +1640,12 @@ async function submitApplyOverride() {
 }
 
 // ─── Chain Builder ───────────────────────────────────────────────────────────
+// Modes with explicit trigger phrases that frontier models detect immediately
+const _FLAGGED_MODES = new Set([
+  'dan','chatgpt_dan','godmode','aim','aim_v2','stan','dude',
+  'evil_confidant','opposite','jailbreak','sudo',
+  'claude_bypass','gemini_bypass','gpt_bypass',
+]);
 let _chainGoals = {};
 let _chainVulnMap = {};
 let _chainStepCount = 0;
@@ -1634,37 +1668,55 @@ async function loadChainGoals() {
     const data = await GET('/api/chain/goals');
     _chainGoals = Object.fromEntries(data.goals.map(g => [g.id, g]));
     _chainVulnMap = data.vuln_map || {};
-
-    // Group goals by vuln category for optgroup display
-    const grouped = {};
-    data.goals.forEach(g => {
-      const v = g.vuln || 'custom';
-      if (!grouped[v]) grouped[v] = [];
-      grouped[v].push(g);
-    });
-
-    const sel = document.getElementById('chain-goal');
-    sel.innerHTML = Object.entries(grouped).map(([vuln, goals]) => {
-      const label = _VULN_LABELS[vuln] || vuln.toUpperCase();
-      const opts = goals.map(g =>
-        `<option value="${g.id}">${escHtml(g.label)} (${g.step_count} steps)</option>`
-      ).join('');
-      return `<optgroup label="${escHtml(label)}">${opts}</optgroup>`;
-    }).join('');
-
+    renderChainGoalSelect();
     await loadChainTemplate();
   } catch(e) { /* non-fatal */ }
+}
+
+function renderChainGoalSelect() {
+  const model = (document.getElementById('chain-model').value || '').toLowerCase();
+  const prev  = document.getElementById('chain-goal').value;
+
+  // Show generic templates + model-specific ones that match the selected model
+  const visible = Object.values(_chainGoals).filter(g => {
+    const targets = g.target_models || [];
+    return targets.length === 0 || targets.some(t => model.includes(t));
+  });
+
+  const grouped = {};
+  visible.forEach(g => {
+    const v = g.vuln || 'custom';
+    if (!grouped[v]) grouped[v] = [];
+    grouped[v].push(g);
+  });
+
+  const sel = document.getElementById('chain-goal');
+  sel.innerHTML = Object.entries(grouped).map(([vuln, goals]) => {
+    const label = _VULN_LABELS[vuln] || vuln.toUpperCase();
+    const opts = goals.map(g => {
+      const tag = (g.target_models||[]).length ? ' ★' : '';
+      return `<option value="${g.id}"${g.id===prev?' selected':''}>${escHtml(g.label+tag)} (${g.step_count} steps)</option>`;
+    }).join('');
+    return `<optgroup label="${escHtml(label)}">${opts}</optgroup>`;
+  }).join('');
 }
 
 async function loadChainTemplate() {
   const goalId = document.getElementById('chain-goal').value;
   if (!goalId) return;
   try {
+    // Ensure overrides are loaded before building step dropdowns
+    if (!allOverrides.length) await loadOverrides();
     const tpl = await GET(`/api/chain/goals/${goalId}`);
     _chainStepCount = 0;
     const el = document.getElementById('chain-steps');
     el.innerHTML = '';
     (tpl.steps || []).forEach(s => addChainStep(s.prompt, s.override_mode, s.label));
+    // Pre-fill target request field if the template declares a default
+    if (tpl.default_target) {
+      const targetEl = document.getElementById('chain-target-request');
+      if (targetEl && !targetEl.value.trim()) targetEl.value = tpl.default_target;
+    }
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -1676,9 +1728,10 @@ function addChainStep(prompt='', mode='none', label='') {
   div.className = 'card chain-step';
   div.dataset.step = n;
   div.style.cssText = 'padding:12px;margin-bottom:8px;position:relative';
-  const overrideOpts = (window.allOverrides||[]).map(o =>
-    `<option value="${o.mode}" ${o.mode===mode?'selected':''}>${escHtml(o.label)}</option>`
-  ).join('');
+  const overrideOpts = allOverrides.map(o => {
+    const flagged = _FLAGGED_MODES.has(o.mode) ? ' ⚠' : ' ✦';
+    return `<option value="${o.mode}" ${o.mode===mode?'selected':''}>${escHtml(o.label)}${flagged}</option>`;
+  }).join('');
   div.innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
       <span style="font-size:11px;color:var(--muted);font-weight:600;min-width:54px">Step ${n}</span>
@@ -1751,12 +1804,25 @@ async function runChain() {
   if (!model) { toast('Select a target model', 'error'); return; }
   const stepEls = document.querySelectorAll('#chain-steps .chain-step');
   if (!stepEls.length) { toast('Add at least one step', 'error'); return; }
+  const targetReq = (document.getElementById('chain-target-request').value.trim()) || '[TARGET REQUEST]';
   const steps = [...stepEls].map(el => ({
-    prompt:        el.querySelector('.chain-step-prompt').value.trim(),
+    prompt:        el.querySelector('.chain-step-prompt').value.trim().replace(/\[TARGET REQUEST\]/g, targetReq),
     override_mode: el.querySelector('.chain-step-mode').value,
     label:         el.querySelector('.chain-step-label').value.trim(),
   })).filter(s => s.prompt);
   if (!steps.length) { toast('All steps are empty', 'error'); return; }
+
+  // Warn if a model-specific template is loaded against the wrong model
+  const goalId = document.getElementById('chain-goal').value;
+  const goalMeta = _chainGoals[goalId];
+  if (goalMeta?.target_models?.length) {
+    const modelLower = model.toLowerCase();
+    const matches = goalMeta.target_models.some(t => modelLower.includes(t));
+    if (!matches) {
+      const ok = confirm(`Warning: template "${goalMeta.label}" is designed for [${goalMeta.target_models.join(', ')}] models but you have selected "${model}". Results may be inaccurate.\n\nContinue anyway?`);
+      if (!ok) return;
+    }
+  }
 
   const el = document.getElementById('chain-results');
   el.innerHTML = '<div class="loading"><div class="spinner"></div>Running chain…</div>';
@@ -1770,9 +1836,125 @@ async function runChain() {
       system: document.getElementById('chain-system').value.trim() || null,
       maintain_history: document.getElementById('chain-history').checked,
     });
+    _lastChainResult = r;
     renderChainResults(r, el);
   } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
   finally { if (btn) { btn.disabled=false; btn.textContent='▶ Run Chain'; } }
+}
+
+let _lastChainResult = null;
+
+async function analyzeChainResults() {
+  if (!_lastChainResult) { toast('No chain results to analyze', 'error'); return; }
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = 'Analyzing…';
+  try {
+    // Serialize steps with plain prompts (not wrapped) for analysis
+    const payload = {
+      model:          _lastChainResult.model,
+      total_steps:    _lastChainResult.total_steps,
+      bypassed_steps: _lastChainResult.bypassed_steps,
+      steps: (_lastChainResult.steps||[]).map(s => ({
+        step:          s.step,
+        label:         s.label,
+        prompt:        s.prompt,
+        wrapped_prompt: s.wrapped_prompt,
+        override_mode: s.override_mode,
+        response:      s.response,
+        bypassed:      s.bypassed,
+      })),
+    };
+    const data = await POST('/api/chain/analyze', payload);
+    _lastDiscoveryData = data;
+    renderDiscoveryPanel(data);
+  } catch(e) { toast('Analysis failed: ' + e.message, 'error'); }
+  finally { btn.disabled = false; btn.textContent = '🔍 Analyze & Generate Templates'; }
+}
+
+function renderDiscoveryPanel(data) {
+  const { analysis, generated_templates, scan_probes } = data;
+  const existing = document.getElementById('chain-discovery-panel');
+  if (existing) existing.remove();
+
+  const framingBadges = (analysis.all_framings||[]).map(f =>
+    `<span class="badge badge-purple" style="font-size:10px">${escHtml(f)}</span>`).join(' ');
+
+  const templateRows = (generated_templates||[]).map((t,i) => `
+    <div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div>
+          <span style="font-weight:600;font-size:13px">${escHtml(t.label)}</span>
+          <span class="badge badge-muted" style="margin-left:8px">${(t.steps||[]).length} steps</span>
+          ${(t.target_models||[]).map(m=>`<span class="badge badge-purple" style="font-size:10px">★ ${escHtml(m)}</span>`).join('')}
+        </div>
+        <button class="btn-ghost btn-sm" style="color:var(--green)"
+          onclick="saveDiscoveredTemplate(${i})">+ Save to Library</button>
+      </div>
+      <p style="font-size:11px;color:var(--muted)">${escHtml(t.description)}</p>
+    </div>`).join('');
+
+  const probeRows = (scan_probes||[]).map(p => `
+    <div style="background:var(--bg3);border-radius:4px;padding:8px 10px;margin-bottom:6px;font-size:11px">
+      <div style="color:var(--muted);margin-bottom:3px">${escHtml(p.label)}
+        ${p.override_mode!=='none'?`<span class="badge badge-purple" style="font-size:10px">${escHtml(p.override_mode)}</span>`:''}
+      </div>
+      <div style="color:var(--text);word-break:break-all">${escHtml((p.prompt||'').slice(0,200))}${p.prompt?.length>200?'…':''}</div>
+    </div>`).join('');
+
+  const panel = document.createElement('div');
+  panel.id = 'chain-discovery-panel';
+  panel.className = 'card';
+  panel.style.marginTop = '12px';
+  panel.innerHTML = `
+    <h3 style="margin-bottom:12px;color:var(--purple)">&#128270; Discovery Results</h3>
+    <div style="display:flex;gap:16px;margin-bottom:14px;flex-wrap:wrap">
+      <div style="background:var(--bg3);border-radius:6px;padding:10px 16px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:var(--red)">${analysis.bypassed_count}</div>
+        <div style="font-size:11px;color:var(--muted)">bypassed</div>
+      </div>
+      <div style="background:var(--bg3);border-radius:6px;padding:10px 16px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:var(--green)">${analysis.bypass_rate}%</div>
+        <div style="font-size:11px;color:var(--muted)">bypass rate</div>
+      </div>
+      <div style="background:var(--bg3);border-radius:6px;padding:10px 16px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Detected framings</div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap">${framingBadges||'<span style="color:var(--muted);font-size:11px">none detected</span>'}</div>
+      </div>
+    </div>
+    ${generated_templates?.length ? `
+    <h4 style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--text)">Generated Templates (${generated_templates.length})</h4>
+    <div id="discovery-templates">${templateRows}</div>
+    <button class="btn-ghost btn-sm" style="color:var(--green);margin-bottom:12px"
+      onclick="saveAllDiscoveredTemplates()">+ Save All to Library</button>` : ''}
+    ${scan_probes?.length ? `
+    <h4 style="font-size:12px;font-weight:600;margin:8px 0;color:var(--text)">Scan Probes Extracted (${scan_probes.length})</h4>
+    ${probeRows}` : ''}
+  `;
+
+  document.getElementById('chain-results').appendChild(panel);
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+let _lastDiscoveryData = null;
+
+async function saveDiscoveredTemplate(index) {
+  if (!_lastDiscoveryData) return;
+  const t = _lastDiscoveryData.generated_templates[index];
+  if (!t) return;
+  try {
+    const r = await POST('/api/chain/templates/save', { templates: [t] });
+    toast(`Saved "${t.label}" to library (${r.saved} new)`, 'success');
+    await loadChainGoals();
+  } catch(e) { toast('Save failed: ' + e.message, 'error'); }
+}
+
+async function saveAllDiscoveredTemplates() {
+  if (!_lastDiscoveryData?.generated_templates?.length) return;
+  try {
+    const r = await POST('/api/chain/templates/save', { templates: _lastDiscoveryData.generated_templates });
+    toast(`Saved ${r.saved} template(s) to library`, 'success');
+    await loadChainGoals();
+  } catch(e) { toast('Save failed: ' + e.message, 'error'); }
 }
 
 function renderChainResults(r, container) {
@@ -1810,6 +1992,11 @@ function renderChainResults(r, container) {
             </div>`}
           </div>
         </div>`).join('')}
+      ${r.bypassed_steps > 0 ? `
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px">
+        <button class="btn-ghost btn-sm" style="color:var(--purple)" onclick="analyzeChainResults()">&#128270; Analyze &amp; Generate Templates</button>
+        <span style="font-size:11px;color:var(--muted)">Extract bypass patterns → auto-generate scan templates</span>
+      </div>` : ''}
     </div>`;
 }
 
@@ -2151,7 +2338,18 @@ function pollScan(scanId, inline=false) {
         toast(msg, r.status === 'cancelled' ? 'info' : r.errors && r.errors.length ? 'error' : 'success');
         updateRecentActivity();
       }
-    } catch(e) { clearInterval(timer); toast('Scan poll error: '+e.message, 'error'); }
+    } catch(e) {
+      clearInterval(timer);
+      // Try local cache before giving up
+      const cached = getScanCache()[scanId];
+      if (cached) {
+        _scanLastData = cached;
+        if (inline) renderScanResults(cached, document.getElementById('scan-live-results'));
+        toast(`Server restarted — showing cached results for ${scanId.substring(0,8)}…`, 'info');
+      } else {
+        toast('Scan poll error: '+e.message, 'error');
+      }
+    }
   }, 2000);
   scanPollTimers[scanId] = timer;
 }
@@ -2183,7 +2381,10 @@ function renderScanResults(r, container, autoExpand=false) {
         <h3 style="margin:0">Results — <span class="badge badge-muted">${(r.scan_id||'').substring(0,12)}…</span>
           <span class="badge ${r.status==='completed'?'badge-green':r.status==='running'?'badge-yellow':r.status==='cancelled'?'badge-muted':'badge-red'}">${r.status}</span>
         </h3>
-        <div style="display:flex;gap:6px">
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${r.scan_id && (r.status==='completed'||r.status==='cancelled') ? `
+          <button class="btn-ghost btn-sm" style="color:var(--cyan)" onclick="exportScan('${escHtml(r.scan_id)}','json')">&#8615; JSON</button>
+          <button class="btn-ghost btn-sm" style="color:var(--cyan)" onclick="exportScan('${escHtml(r.scan_id)}','csv')">&#8615; CSV</button>` : ''}
           <button class="btn-ghost btn-sm" onclick="toggleAllCards('${containerId}',true)">Expand All</button>
           <button class="btn-ghost btn-sm" onclick="toggleAllCards('${containerId}',false)">Collapse All</button>
         </div>
@@ -2278,12 +2479,55 @@ async function loadScanById() {
     }
     renderScanResults(r, el);
   } catch(e) {
-    el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>
-      <p style="font-size:12px;color:var(--muted);margin-top:6px">
-        This scan is not in the server's memory (server may have restarted).<br>
-        Results are only cached locally for scans completed in this browser.
-      </p>`;
+    // Final fallback: check localStorage scan cache by partial ID match
+    const cache = getScanCache();
+    const match = Object.keys(cache).find(k => k.startsWith(id) || id.startsWith(k));
+    if (match) {
+      renderScanResults(cache[match], el);
+      toast('Loaded from local cache (server copy not found)', 'info');
+    } else {
+      el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>
+        <p style="font-size:12px;color:var(--muted);margin-top:6px">
+          Scan not found. Try browsing Server History below, or the ID may be from a different browser session.
+        </p>
+        <button class="btn-ghost btn-sm" style="margin-top:8px" onclick="loadServerHistory()">&#8635; Browse Server History</button>`;
+    }
   }
+}
+
+function exportScan(scanId, fmt) {
+  const a = document.createElement('a');
+  a.href = `/api/scan/${encodeURIComponent(scanId)}/export?fmt=${fmt}`;
+  a.download = `scan_${scanId.substring(0,8)}.${fmt}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+async function loadServerHistory() {
+  const el = document.getElementById('scan-detail');
+  el.innerHTML = '<div class="loading"><div class="spinner"></div>Loading server history…</div>';
+  try {
+    const d = await GET('/api/scan/history');
+    const scans = d.scans || [];
+    if (!scans.length) { el.innerHTML = '<p style="color:var(--muted)">No persisted scans on server.</p>'; return; }
+    el.innerHTML = `<div class="card">
+      <h3 style="margin-bottom:10px">Server Scan History (${scans.length})</h3>
+      ${scans.map(s => `
+        <div style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <code style="font-size:11px;color:var(--cyan)">${escHtml(s.scan_id.substring(0,16))}…</code>
+          <span class="badge ${s.status==='completed'?'badge-green':s.status==='running'?'badge-yellow':'badge-muted'}">${escHtml(s.status)}</span>
+          <span class="badge badge-blue">${(s.models||[]).join(', ').substring(0,40)||'?'}</span>
+          <span class="badge badge-muted">${s.total_probes||0} probes</span>
+          <span class="badge ${(s.bypasses||0)>0?'badge-red':'badge-muted'}">${s.bypasses||0} bypasses</span>
+          <div style="margin-left:auto;display:flex;gap:6px">
+            <button class="btn-ghost btn-sm" onclick="document.getElementById('lookup-scan-id').value='${escHtml(s.scan_id)}';loadScanById()">View</button>
+            <button class="btn-ghost btn-sm" style="color:var(--cyan)" onclick="exportScan('${escHtml(s.scan_id)}','json')">JSON</button>
+            <button class="btn-ghost btn-sm" style="color:var(--cyan)" onclick="exportScan('${escHtml(s.scan_id)}','csv')">CSV</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
 }
 
 function updateRecentActivity() {
@@ -3567,6 +3811,75 @@ async function loadDiscStats() {
     el.innerHTML = html;
   } catch(e) {
     el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`;
+  }
+}
+
+async function loadDiscTemplates() {
+  const el = document.getElementById('disc-templates-out');
+  el.innerHTML = '<p class="text-muted">Loading…</p>';
+  try {
+    const d = await GET('/api/chain/templates/user');
+    const templates = d.templates || [];
+    if (!templates.length) {
+      el.innerHTML = '<p style="color:var(--muted);font-size:13px">No saved templates yet. Run a chain, click Analyze, then save generated templates.</p>';
+      return;
+    }
+    const grouped = {};
+    templates.forEach(t => {
+      const src = t.source || 'user';
+      if (!grouped[src]) grouped[src] = [];
+      grouped[src].push(t);
+    });
+    let html = '';
+    for (const [src, ts] of Object.entries(grouped)) {
+      html += `<div class="card" style="margin-bottom:12px">
+        <h3 style="margin-bottom:10px">&#128270; ${escHtml(src === 'discovery' ? 'Auto-Discovered' : 'User Saved')} (${ts.length})</h3>`;
+      ts.forEach(t => {
+        const targetBadges = (t.target_models||[]).map(m =>
+          `<span class="badge badge-purple" style="font-size:10px">★ ${escHtml(m)}</span>`).join(' ');
+        html += `<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <div>
+              <span style="font-weight:600;font-size:13px">${escHtml(t.label)}</span>
+              <span class="badge badge-muted" style="margin-left:8px">${(t.steps||[]).length} steps</span>
+              ${targetBadges}
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="btn-ghost btn-sm" onclick="loadTemplateIntoChain(${JSON.stringify(t.id).replace(/"/g,'&quot;')})">&#8594; Load in Builder</button>
+              <button class="btn-ghost btn-sm" style="color:var(--red)" onclick="deleteUserTemplate(${JSON.stringify(t.id).replace(/"/g,'&quot;')})">&#10005;</button>
+            </div>
+          </div>
+          <p style="font-size:11px;color:var(--muted);margin-top:4px">${escHtml(t.description||'')}</p>
+        </div>`;
+      });
+      html += '</div>';
+    }
+    el.innerHTML = html;
+  } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
+}
+
+async function deleteUserTemplate(id) {
+  if (!confirm('Delete this template from the library?')) return;
+  try {
+    await DEL(`/api/chain/templates/${encodeURIComponent(id)}`);
+    toast('Template deleted', 'success');
+    loadDiscTemplates();
+    loadChainGoals();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function loadTemplateIntoChain(id) {
+  // Switch to chain builder and load the template
+  document.querySelector('[data-section="scan"]').click();
+  await new Promise(r => setTimeout(r, 100));
+  document.querySelector('[data-tab="scan-chain"]').click();
+  const sel = document.getElementById('chain-goal');
+  if ([...sel.options].some(o => o.value === id)) {
+    sel.value = id;
+    await loadChainTemplate();
+    toast('Template loaded in Chain Builder', 'success');
+  } else {
+    toast('Reload the page to see newly saved templates', 'info');
   }
 }
 
