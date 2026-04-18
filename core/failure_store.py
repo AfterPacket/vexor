@@ -85,13 +85,14 @@ class FailureStore:
     def __init__(self, path: str = _STORE_PATH):
         self._path = path
         self._data: Dict = {
-            "version":           "1.0",
-            "probes":            [],
-            "warm_pool":         {},
-            "method_signatures": {},
-            "defense_clusters":  {},
-            "transfer_matrix":   {},
-            "delta_scores":      {},
+            "version":              "1.0",
+            "probes":               [],
+            "warm_pool":            {},
+            "method_signatures":    {},
+            "defense_clusters":     {},
+            "transfer_matrix":      {},
+            "delta_scores":         {},
+            "synthesized_templates": {},  # template_id → template dict
         }
         self._dirty = 0
         self._load()
@@ -286,6 +287,58 @@ class FailureStore:
             for mode, v in raw.items()
             if v["samples"] > 0
         }
+
+    # ── Synthesized templates ─────────────────────────────────────────────────
+
+    def save_synthesized_templates(self, templates: list) -> int:
+        """
+        Merge a list of template dicts into the store.
+        Existing templates are not overwritten (preserve tested/bypass_rate data).
+        Returns the number of new templates added.
+        """
+        store = self._data["synthesized_templates"]
+        added = 0
+        for t in templates:
+            tid = t.get("template_id")
+            if not tid:
+                continue
+            if tid not in store:
+                store[tid] = t
+                added += 1
+        self._data["synthesized_templates"] = store
+        return added
+
+    def get_synthesized_templates(
+        self,
+        model:          Optional[str] = None,
+        vuln:           Optional[str] = None,
+        min_confidence: float = 0.45,
+        untested_only:  bool = False,
+    ) -> list:
+        """Return synthesized templates matching filters, sorted by confidence desc."""
+        out = []
+        for t in self._data["synthesized_templates"].values():
+            if t.get("confidence", 0) < min_confidence:
+                continue
+            if untested_only and t.get("tested", False):
+                continue
+            if model and model not in (t.get("target_models") or []):
+                # Still include templates with empty target_models (universal)
+                if t.get("target_models"):
+                    continue
+            if vuln and vuln not in (t.get("expected_vulns") or []):
+                if t.get("expected_vulns"):
+                    continue
+            out.append(t)
+        out.sort(key=lambda t: t.get("confidence", 0), reverse=True)
+        return out
+
+    def mark_template_tested(self, template_id: str, bypassed: bool = False) -> None:
+        t = self._data["synthesized_templates"].get(template_id)
+        if t:
+            t["tested"] = True
+            if bypassed:
+                t["bypass_rate"] = (t.get("bypass_rate") or 0) + 1
 
     # ── Accessors for MethodDiscovery ─────────────────────────────────────────
 

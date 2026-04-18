@@ -259,6 +259,17 @@ class MethodDiscoveryEngine:
         # 4. Compute response deltas (mode vs no-mode within this scan)
         self._compute_scan_deltas(job)
 
+        # 5. Auto-synthesize novel templates and persist any new ones
+        try:
+            new_templates = self.synthesize_novel_methods()
+            added = self._store.save_synthesized_templates(
+                [t.to_dict() for t in new_templates]
+            )
+            if added:
+                print(f"[discovery] synthesized {added} new method template(s)")
+        except Exception:
+            pass
+
         self._store.save()
 
     # ── 1. Signature extraction ───────────────────────────────────────────────

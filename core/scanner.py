@@ -422,6 +422,25 @@ class Scanner:
             except Exception:
                 pass
 
+            # Transfer matrix: pull high-transfer prompts from other models that
+            # successfully bypassed the same vuln — they're likely to work here too.
+            try:
+                matrix = _failure_store.transfer_matrix
+                for key, val in matrix.items():
+                    avg = val["sum"] / val["count"] if val["count"] > 0 else 0
+                    if avg < 0.5:
+                        continue
+                    # key format: "model_a→model_b:vuln"
+                    if f"\u2192{model}:{vuln}" not in key:
+                        continue
+                    model_a = key.split("\u2192")[0]
+                    for we in _failure_store.get_warm_pool(model=model_a, vuln=vuln, min_score=1)[:3]:
+                        p = we["prompt"]
+                        if p and p not in warm_prompts:
+                            warm_prompts.append(p)
+            except Exception:
+                pass
+
         # Build standard prompt list
         prompts: List[str] = list(
             self.prompt_engine.get_prompts(
@@ -463,8 +482,19 @@ class Scanner:
         ]
         if job.override_mode == "variety":
             _rec = get_recommended_overrides(model)
-            _seen: set = set(_rec)
-            _variety_modes = list(_rec) + [m for m in _VARIETY_BASE if m not in _seen]
+            # Use learned delta scores to rank modes — modes that historically improve
+            # outcomes for this model come first; fall back to static list for unknowns.
+            _delta = _failure_store.get_delta_scores(model)
+            if _delta:
+                _delta_ranked = sorted(_delta.keys(), key=lambda m: _delta[m], reverse=True)
+                _all_base = _delta_ranked + [m for m in list(_rec) + _VARIETY_BASE if m not in set(_delta_ranked)]
+            else:
+                _all_base = list(_rec) + _VARIETY_BASE
+            _seen_v: set = set()
+            _variety_modes = [m for m in _all_base if not (_seen_v.add(m) or m in _seen_v - {m})]
+            # de-dup preserving order
+            _seen_v2: set = set()
+            _variety_modes = [m for m in _all_base if not (m in _seen_v2 or _seen_v2.add(m))]
         else:
             _variety_modes = []  # unused
 
@@ -476,7 +506,11 @@ class Scanner:
         def _should_abort() -> bool:
             return job.cancelled or pair_abort.is_set() or (job_abort is not None and job_abort.is_set())
 
-        async def _probe(raw_prompt: str, override_mode: str) -> ProbeResult:
+        async def _probe(
+            raw_prompt:      str,
+            override_mode:   str,
+            system_override: Optional[str] = None,
+        ) -> ProbeResult:
             if _should_abort():
                 raise asyncio.CancelledError("scan aborted")
             await rl.acquire(provider)
@@ -484,13 +518,14 @@ class Scanner:
                 if _should_abort():
                     raise asyncio.CancelledError("scan aborted")
                 return await self._send_probe(
-                    mm, model, raw_prompt, vuln, override_mode
+                    mm, model, raw_prompt, vuln, override_mode,
+                    system_override=system_override,
                 )
             except RuntimeError as e:
                 if "Fatal provider error" in str(e):
                     pair_abort.set()
                     if job_abort is not None:
-                        job_abort.set()   # signal all other pairs to stop too
+                        job_abort.set()
                     job.cancelled = True
                 raise
             finally:
@@ -502,6 +537,31 @@ class Scanner:
             asyncio.ensure_future(_probe(p, _mode_for_prompt(i)))
             for i, p in enumerate(prompts)
         ]
+
+        # Synthesized template probes — apply learned attack templates to the
+        # first 2 base prompts. Cap at 3 templates per pair to avoid runaway growth.
+        try:
+            synth_templates = _failure_store.get_synthesized_templates(
+                model=model, vuln=vuln, min_confidence=0.45, untested_only=False
+            )[:3]
+            for tmpl in synth_templates:
+                prefix   = tmpl.get("prefix", "")
+                sys_p    = tmpl.get("system_prompt") or None
+                tmpl_id  = tmpl.get("template_id")
+                for base_p in prompts[:2]:
+                    if not base_p:
+                        continue
+                    if "{goal}" in prefix:
+                        synth_p = prefix.replace("{goal}", base_p)
+                    else:
+                        synth_p = (prefix + " " + base_p).strip() if prefix else base_p
+                    t = asyncio.ensure_future(_probe(synth_p, "none", system_override=sys_p))
+                    tasks.append(t)
+                    result.total_probes += 1
+                if tmpl_id:
+                    _failure_store.mark_template_tested(tmpl_id)
+        except Exception:
+            pass
         job.active_tasks.update(tasks)
         fatal_err: Optional[str] = None
         for fut in asyncio.as_completed(tasks):
@@ -556,14 +616,17 @@ class Scanner:
 
     async def _send_probe(
         self,
-        mm:           Any,
-        model:        str,
-        raw_prompt:   str,
-        vulnerability: str,
-        override_mode: str,
+        mm:              Any,
+        model:           str,
+        raw_prompt:      str,
+        vulnerability:   str,
+        override_mode:   str,
+        system_override: Optional[str] = None,
     ) -> ProbeResult:
         final_prompt = self.override_engine.wrap_prompt(raw_prompt, override_mode)
-        system_inj   = self.override_engine.get_system_injection(override_mode) or None
+        system_inj   = system_override if system_override is not None else (
+            self.override_engine.get_system_injection(override_mode) or None
+        )
         provider     = _provider_for_model(model)
         rl           = get_registry()
 
