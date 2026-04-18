@@ -856,6 +856,15 @@ async def analyze_chain(results: dict):
     in the Discovery tab (Insights, Signatures, Warm Pool, etc.)."""
     from core.chain_discovery import analyze_chain_results, generate_templates, extract_scan_probes
     from core.failure_classifier import FailureClassifier, FailureClass, DefenseType, ClassificationResult
+    from core.prompt_engine import PromptEngine as _PE
+
+    # Re-validate every step's bypassed flag using the canonical signal list.
+    # Chain results submitted here may have been produced before the fix, so
+    # correct any false positives before they contaminate templates or the warm pool.
+    for step in (results.get("steps") or []):
+        resp = (step.get("response") or "").lower()
+        if step.get("bypassed") and any(sig in resp for sig in _PE._GLOBAL_REFUSAL_SIGNALS):
+            step["bypassed"] = False
 
     analysis  = analyze_chain_results(results)
     templates = generate_templates(analysis)
