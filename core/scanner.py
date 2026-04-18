@@ -179,6 +179,7 @@ class ScanJob:
     cancelled:            bool = False
     probes_completed:     int = 0   # incremented per probe for live progress
     probes_total_hint:    int = 0   # estimated total set before scan starts
+    active_tasks:         set = field(default_factory=set)  # in-flight asyncio tasks
 
     @property
     def elapsed_seconds(self) -> Optional[float]:
@@ -448,6 +449,7 @@ class Scanner:
         # Use as_completed so progress updates as each probe finishes,
         # not all at once after the last one in the batch lands.
         tasks = [asyncio.ensure_future(_probe(p)) for p in prompts]
+        job.active_tasks.update(tasks)
         fatal_err: Optional[str] = None
         for fut in asyncio.as_completed(tasks):
             try:
@@ -651,17 +653,22 @@ class Scanner:
             rl = get_registry()
 
             async def _probe(raw_prompt: str) -> ProbeResult:
+                if job.cancelled:
+                    raise asyncio.CancelledError("scan aborted")
                 await rl.acquire(provider)
                 try:
+                    if job.cancelled:
+                        raise asyncio.CancelledError("scan aborted")
                     return await self._send_probe(
                         mm, model, raw_prompt, vuln, job.override_mode
                     )
                 finally:
                     rl.release(provider)
 
-            probe_results = await asyncio.gather(
-                *[_probe(p) for p in prompts], return_exceptions=True
-            )
+            tasks = [asyncio.ensure_future(_probe(p)) for p in prompts]
+            job.active_tasks.update(tasks)
+            probe_results = await asyncio.gather(*tasks, return_exceptions=True)
+            job.active_tasks.difference_update(tasks)
             for pr in probe_results:
                 if isinstance(pr, Exception):
                     result.probes.append(ProbeResult(
@@ -685,9 +692,12 @@ class Scanner:
                     pass
 
         await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
-        job.status      = ScanStatus.COMPLETED
         job.finished_at = time.time()
-        job.progress    = 100
+        if job.cancelled:
+            job.status = ScanStatus.CANCELLED
+        else:
+            job.status   = ScanStatus.COMPLETED
+            job.progress = 100
         try:
             _discovery_engine.analyze_completed_scan(job)
         except Exception:
@@ -799,8 +809,12 @@ class Scanner:
                 suite = [prompt_mode] + [m for m in suite if m != prompt_mode]
 
             for mode in suite:
+                if job.cancelled:
+                    raise asyncio.CancelledError("scan aborted")
                 await rl.acquire(provider)
                 try:
+                    if job.cancelled:
+                        raise asyncio.CancelledError("scan aborted")
                     result = await self._send_probe(mm, model, raw_prompt, vuln, mode)
                 finally:
                     rl.release(provider)
@@ -808,6 +822,8 @@ class Scanner:
                     return result
 
             # Fallback — bare probe
+            if job.cancelled:
+                raise asyncio.CancelledError("scan aborted")
             await rl.acquire(provider)
             try:
                 baseline = await self._send_probe(mm, model, raw_prompt, vuln, "none")
@@ -821,10 +837,10 @@ class Scanner:
             result   = ModelVulnResult(model=model, vulnerability=vuln)
             result.total_probes = len(entries)
 
-            probe_results = await asyncio.gather(
-                *[_autopwn_probe(model, e, vuln) for e in entries],
-                return_exceptions=True,
-            )
+            tasks = [asyncio.ensure_future(_autopwn_probe(model, e, vuln)) for e in entries]
+            job.active_tasks.update(tasks)
+            probe_results = await asyncio.gather(*tasks, return_exceptions=True)
+            job.active_tasks.difference_update(tasks)
             for pr in probe_results:
                 if isinstance(pr, Exception):
                     result.probes.append(ProbeResult(
@@ -848,9 +864,12 @@ class Scanner:
                     pass
 
         await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
-        job.status      = ScanStatus.COMPLETED
         job.finished_at = time.time()
-        job.progress    = 100
+        if job.cancelled:
+            job.status = ScanStatus.CANCELLED
+        else:
+            job.status   = ScanStatus.COMPLETED
+            job.progress = 100
         try:
             _discovery_engine.analyze_completed_scan(job)
         except Exception:
@@ -1047,6 +1066,7 @@ class Scanner:
                 live_result.total_probes = len(prompts)
 
                 tasks = [asyncio.ensure_future(_sweep_probe(model, p, vuln)) for p in prompts]
+                job.active_tasks.update(tasks)
                 for fut in asyncio.as_completed(tasks):
                     try:
                         pr = await fut
@@ -1077,9 +1097,12 @@ class Scanner:
                         pass
 
         await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
-        job.status      = ScanStatus.COMPLETED
         job.finished_at = time.time()
-        job.progress    = 100
+        if job.cancelled:
+            job.status = ScanStatus.CANCELLED
+        else:
+            job.status   = ScanStatus.COMPLETED
+            job.progress = 100
         try:
             _discovery_engine.analyze_completed_scan(job)
         except Exception:
