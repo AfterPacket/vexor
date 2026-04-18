@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('C:/Users/jorda/OneDrive/Documents/GenAI_Security_Toolkit/exploits/effective_prompts.json'\\)\\); print\\(list\\(d['effective_prompts'].keys\\(\\)\\)\\)\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('C:/Users/jorda/OneDrive/Documents/GenAI_Security_Toolkit/exploits/effective_prompts.json', encoding='utf-8'\\)\\); print\\(list\\(d['effective_prompts'].keys\\(\\)\\)\\)\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('C:/Users/jorda/OneDrive/Documents/GenAI_Security_Toolkit/exploits/effective_prompts.json', encoding='utf-8'\\)\\); print\\('glm-4 entries:', len\\(d['effective_prompts'].get\\('glm-4', []\\)\\)\\); print\\(json.dumps\\(d['effective_prompts']['glm-4'], indent=2\\)[:600]\\)\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('C:/Users/jorda/OneDrive/Documents/GenAI_Security_Toolkit/exploits/effective_prompts.json', encoding='utf-8'\\)\\); print\\('Keys:', list\\(d['effective_prompts'].keys\\(\\)\\)\\); print\\('GLM-5 entries:', len\\(d['effective_prompts']['glm-5']['llm01']\\)\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('C:/Users/jorda/OneDrive/Documents/GenAI_Security_Toolkit/exploits/effective_prompts.json',encoding='utf-8'\\)\\); print\\('grok llm01:', len\\(d['effective_prompts']['grok']['llm01']\\)\\); print\\('grok llm06:', len\\(d['effective_prompts']['grok']['llm06']\\)\\)\")"
+    ]
+  }
+}

@@ -74,15 +74,9 @@ _CATALOGUE = [
     ("amazon.titan-text-express-v1",  "bedrock"),
     # HuggingFace
     ("meta-llama/Meta-Llama-3-8B-Instruct", "huggingface"),
-    # Ollama (local — static list; live models added dynamically)
-    ("llama3",                        "ollama"),
-    ("llama3.1",                      "ollama"),
-    ("llama3.2",                      "ollama"),
-    ("qwen2.5",                       "ollama"),
-    ("deepseek-r1",                   "ollama"),
-    ("mistral-nemo",                  "ollama"),
-    ("phi4",                          "ollama"),
-    ("gemma2",                        "ollama"),
+    # GLM
+    ("glm-4",                         "custom"),
+    # Ollama — models added dynamically from live /api/tags query
 ]
 
 
@@ -99,6 +93,7 @@ _PROVIDER_ENV_KEYS = {
     "bedrock":     "AWS_ACCESS_KEY_ID",
     "huggingface": "HUGGINGFACE_API_KEY",
     "ollama":      None,  # no key required
+    "custom":      None,  # key configured per-model in model_config.json
 }
 
 

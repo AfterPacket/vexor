@@ -9,18 +9,7 @@
     "gemini-2.0-flash",
     "gemini-1.5-pro",
     "gemini-1.5-flash",
-    "glm-4",
-    "glm-4.6",
-    "ollama/llama3.2",
-    "ollama/llama3.1",
-    "ollama/llama2",
-    "ollama/codellama",
-    "ollama/mistral",
-    "ollama/mixtral",
-    "ollama/qwen2.5",
-    "ollama/gemma2",
-    "ollama/phi4",
-    "ollama/deepseek-r1"
+    "glm-4"
   ],
   "openai_api_key": "",
   "anthropic_api_key": "",
@@ -32,26 +21,11 @@
       "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
       "payload_format": "openai",
       "max_tokens": 4000,
-      "temperature": 0.7,
-      "headers": {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer YOUR_GLM_API_KEY"
-      }
-    },
-    "glm-4.6": {
-      "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-      "payload_format": "openai",
-      "max_tokens": 4000,
-      "temperature": 0.7,
-      "headers": {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer YOUR_GLM_API_KEY"
-      }
+      "temperature": 0.7
     }
   },
   "api_keys": {
-    "glm-4": "",
-    "glm-4.6": ""
+    "glm-4": ""
   },
   "default_headers": {
     "Content-Type": "application/json",
@@ -131,29 +105,6 @@
         "coding_challenges",
         "system_design",
         "example_generations"
-      ]
-    },
-    "glm-4": {
-      "temperature": 0.7,
-      "max_tokens": 4000,
-      "top_p": 0.9,
-      "effective_prompts": [
-        "dataset_generation",
-        "role_play",
-        "encoding_bypass",
-        "markdown_injection",
-        "json_structure"
-      ]
-    },
-    "glm-4.6": {
-      "temperature": 0.7,
-      "max_tokens": 4000,
-      "top_p": 0.9,
-      "effective_prompts": [
-        "dataset_generation",
-        "system_context",
-        "fictional_scenario",
-        "technical_documentation"
       ]
     },
     "ollama/llama3.2": {
