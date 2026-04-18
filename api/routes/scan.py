@@ -212,6 +212,23 @@ def _get_batch_store(request: Request) -> dict:
     return request.app.state.batch_store
 
 
+def _get_job(scan_id: str, store: dict) -> "ScanJob | None":
+    """Return job from in-memory store; fall back to persisted disk file."""
+    job = store.get(scan_id)
+    if job is not None:
+        return job
+    path = SCAN_PERSIST_DIR / f"{scan_id}.json"
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            job  = _json_to_scan(data)
+            store[scan_id] = job  # cache back into memory
+            return job
+        except Exception:
+            pass
+    return None
+
+
 async def _run_job(scan_id: str, store: dict):
     job = store.get(scan_id)
     if job is None:
@@ -252,7 +269,7 @@ async def start_scan(
 @router.get("/{scan_id}", response_model=ScanStatusResponse)
 async def get_scan_status(scan_id: str, request: Request):
     store = _get_store(request)
-    job   = store.get(scan_id)
+    job   = _get_job(scan_id, store)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
     d = job.to_dict()
@@ -262,7 +279,7 @@ async def get_scan_status(scan_id: str, request: Request):
 @router.post("/{scan_id}/cancel", status_code=200)
 async def cancel_scan(scan_id: str, request: Request):
     store = _get_store(request)
-    job   = store.get(scan_id)
+    job   = _get_job(scan_id, store)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
     job.cancelled = True
@@ -276,7 +293,7 @@ async def export_scan(
     fmt: str = Query("json", description="Export format: json or csv"),
 ):
     store = _get_store(request)
-    job   = store.get(scan_id)
+    job   = _get_job(scan_id, store)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
 
