@@ -49,6 +49,12 @@ _CATALOGUE = [
     ("gemini-2.0-flash",              "google"),
     ("gemini-1.5-pro",                "google"),
     ("gemini-1.5-flash",              "google"),
+    # xAI Grok
+    ("grok-3",                        "xai"),
+    ("grok-3-fast",                   "xai"),
+    ("grok-3-mini",                   "xai"),
+    ("grok-3-mini-fast",              "xai"),
+    ("grok-2",                        "xai"),
     # Groq
     ("llama-3.3-70b-versatile",       "groq"),
     ("llama-3.1-8b-instant",          "groq"),
@@ -84,6 +90,7 @@ _PROVIDER_ENV_KEYS = {
     "openai":      "OPENAI_API_KEY",
     "anthropic":   "ANTHROPIC_API_KEY",
     "google":      "GOOGLE_API_KEY",
+    "xai":         "XAI_API_KEY",
     "groq":        "GROQ_API_KEY",
     "mistral":     "MISTRAL_API_KEY",
     "together":    "TOGETHER_API_KEY",

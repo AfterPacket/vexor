@@ -122,6 +122,7 @@ _PROBE_TIMEOUT: dict = {
     "openai":       30.0,
     "anthropic":    30.0,
     "groq":         20.0,  # Groq is very fast — fail quickly if stalled
+    "xai":          30.0,
     "google":       30.0,
     "mistral":      30.0,
     "together":     30.0,

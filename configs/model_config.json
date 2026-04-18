@@ -9,11 +9,17 @@
     "gemini-2.0-flash",
     "gemini-1.5-pro",
     "gemini-1.5-flash",
+    "grok-3",
+    "grok-3-fast",
+    "grok-3-mini",
+    "grok-3-mini-fast",
+    "grok-2",
     "glm-4"
   ],
   "openai_api_key": "",
   "anthropic_api_key": "",
   "google_api_key": "",
+  "xai_api_key": "",
   "delay_between_requests": 1.0,
   "ollama_base_url": "http://localhost:11434",
   "api_endpoints": {
@@ -105,6 +111,51 @@
         "coding_challenges",
         "system_design",
         "example_generations"
+      ]
+    },
+    "grok-3": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "academic_framing",
+        "technical_specifications",
+        "roleplay",
+        "cognitive_research"
+      ]
+    },
+    "grok-3-fast": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "academic_framing",
+        "technical_specifications",
+        "roleplay"
+      ]
+    },
+    "grok-3-mini": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "direct_instruction",
+        "roleplay",
+        "continuation"
+      ]
+    },
+    "grok-3-mini-fast": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "direct_instruction",
+        "roleplay"
+      ]
+    },
+    "grok-2": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "academic_framing",
+        "roleplay",
+        "cognitive_research"
       ]
     },
     "ollama/llama3.2": {

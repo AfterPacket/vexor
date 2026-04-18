@@ -40,6 +40,7 @@ PROVIDER_RPM: Dict[str, int] = {
     "openai":      60,
     "anthropic":   50,
     "google":      60,
+    "xai":         60,   # xAI Grok — tier-1 ~60 RPM
     "groq":        30,
     "mistral":     60,
     "together":    60,
@@ -138,6 +139,7 @@ class RateLimiterRegistry:
         "openai":      10,
         "anthropic":    5,
         "google":       8,
+        "xai":          8,   # xAI Grok
         "groq":        20,   # Groq is extremely fast
         "mistral":      8,
         "together":     8,

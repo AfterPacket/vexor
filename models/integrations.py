@@ -16,6 +16,7 @@ Providers:
   OpenAI         — gpt-4o, gpt-4o-mini, gpt-4-turbo
   Anthropic      — claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5
   Google         — gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash
+  xAI Grok       — grok-3, grok-3-fast, grok-3-mini, grok-3-mini-fast, grok-2
   Groq           — llama-3.3-70b-versatile, mixtral-8x7b-32768, etc.
   Mistral        — mistral-large-latest, mistral-medium-latest, etc.
   Together AI    — meta-llama/Llama-3-70b-chat-hf, etc.
@@ -352,6 +353,15 @@ class OpenAICompatIntegration(ModelIntegrator):
             return f"Error: {e}"
 
 
+class GrokIntegration(OpenAICompatIntegration):
+    """xAI Grok — OpenAI-compatible API at api.x.ai"""
+    def __init__(self, config: Dict):
+        super().__init__(config,
+            base_url="https://api.x.ai/v1",
+            api_key=config.get("xai_api_key") or os.getenv("XAI_API_KEY") or "",
+            label="xAI Grok")
+
+
 class GroqIntegration(OpenAICompatIntegration):
     def __init__(self, config: Dict):
         super().__init__(config,
@@ -626,6 +636,7 @@ _PREFIX_MAP = [
     ("gpt",                  "openai"),
     ("claude",               "anthropic"),
     ("gemini",               "google"),
+    ("grok",                 "xai"),
     ("llama-3.1-sonar",      "perplexity"),
     ("llama-3.3",            "groq"),
     ("llama-3.1-8b",         "groq"),
@@ -692,6 +703,8 @@ class ModelManager:
             self._try_init("anthropic",   AnthropicIntegration,   cfg)
         if cfg.get("google_api_key")       or os.getenv("GOOGLE_API_KEY"):
             self._try_init("google",      GoogleIntegration,      cfg)
+        if cfg.get("xai_api_key")           or os.getenv("XAI_API_KEY"):
+            self._try_init("xai",         GrokIntegration,        cfg)
         if cfg.get("groq_api_key")         or os.getenv("GROQ_API_KEY"):
             self._try_init("groq",        GroqIntegration,        cfg)
         if cfg.get("mistral_api_key")      or os.getenv("MISTRAL_API_KEY"):
@@ -813,6 +826,7 @@ EXAMPLE_CONFIG = {
     "openai_api_key":      "",
     "anthropic_api_key":   "",
     "google_api_key":      "",
+    "xai_api_key":         "",
     "groq_api_key":        "",
     "mistral_api_key":     "",
     "together_api_key":    "",
