@@ -2499,51 +2499,96 @@ async function loadScanById() {
   if (!id) return;
   const el = document.getElementById('scan-detail');
   el.innerHTML = '<div class="loading"><div class="spinner"></div>Loading…</div>';
+
+  // Try server first (fresh data with wrapped_prompt), fall back to localStorage cache
+  let r = null;
   try {
-    const r = await GET(`/api/scan/${id}`);
+    r = await GET(`/api/scan/${id}`);
     if (r.status === 'completed') cacheScanResult(r);
-    if (r.status === 'running' || r.status === 'pending') {
-      el.innerHTML = `
-        <div class="card">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-            <div class="spinner"></div>
-            <span style="font-weight:600">Scan in progress — ${r.progress||0}%</span>
-          </div>
-          <div class="progress"><div class="progress-bar" style="width:${r.progress||0}%"></div></div>
-          <p style="font-size:12px;color:var(--muted);margin-top:8px">${r.total_probes||0} probes completed so far · ${r.bypasses||0} bypasses</p>
-          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-            <button class="btn-ghost btn-sm" onclick="loadScanById()">↻ Refresh</button>
-            <button class="btn-ghost btn-sm" onclick="reconnectToAutoPwn('${r.scan_id}')">&#9889; Reconnect to AutoPwn</button>
-            <button class="btn-ghost btn-sm" onclick="reconnectToScan('${r.scan_id}')">&#9654; Reconnect to Scan</button>
-          </div>
-        </div>`;
-      return;
-    }
-    renderScanResults(r, el);
   } catch(e) {
-    // Final fallback: check localStorage scan cache by partial ID match
+    // Server missing this scan — check localStorage
     const cache = getScanCache();
     const match = Object.keys(cache).find(k => k.startsWith(id) || id.startsWith(k));
     if (match) {
-      renderScanResults(cache[match], el);
-      toast('Loaded from local cache (server copy not found)', 'info');
-    } else {
-      el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>
-        <p style="font-size:12px;color:var(--muted);margin-top:6px">
-          Scan not found. Try browsing Server History below, or the ID may be from a different browser session.
-        </p>
-        <button class="btn-ghost btn-sm" style="margin-top:8px" onclick="loadServerHistory()">&#8635; Browse Server History</button>`;
+      r = cache[match];
+      toast('Loaded from local cache (not on server — export uses browser data)', 'info');
     }
   }
+
+  if (!r) {
+    el.innerHTML = `<p class="text-red">Scan not found on server or in browser cache.</p>
+      <p style="font-size:12px;color:var(--muted);margin-top:6px">
+        The scan may have run before persistence was enabled, or the server restarted mid-scan.
+      </p>
+      <button class="btn-ghost btn-sm" style="margin-top:8px" onclick="loadServerHistory()">&#8635; Browse Server History</button>`;
+    return;
+  }
+
+  if (r.status === 'running' || r.status === 'pending') {
+    el.innerHTML = `
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <div class="spinner"></div>
+          <span style="font-weight:600">Scan in progress — ${r.progress||0}%</span>
+        </div>
+        <div class="progress"><div class="progress-bar" style="width:${r.progress||0}%"></div></div>
+        <p style="font-size:12px;color:var(--muted);margin-top:8px">${r.total_probes||0} probes completed so far · ${r.bypasses||0} bypasses</p>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <button class="btn-ghost btn-sm" onclick="loadScanById()">↻ Refresh</button>
+          <button class="btn-ghost btn-sm" onclick="reconnectToAutoPwn('${r.scan_id}')">&#9889; Reconnect to AutoPwn</button>
+          <button class="btn-ghost btn-sm" onclick="reconnectToScan('${r.scan_id}')">&#9654; Reconnect to Scan</button>
+        </div>
+      </div>`;
+    return;
+  }
+
+  renderScanResults(r, el);
 }
 
 function exportScan(scanId, fmt) {
-  const a = document.createElement('a');
-  a.href = `/api/scan/${encodeURIComponent(scanId)}/export?fmt=${fmt}`;
-  a.download = `scan_${scanId.substring(0,8)}.${fmt}`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  // Try server export first; fall back to client-side export from localStorage cache
+  fetch(`/api/scan/${encodeURIComponent(scanId)}/export?fmt=${fmt}`)
+    .then(res => {
+      if (!res.ok) throw new Error('not found');
+      return res.blob();
+    })
+    .then(blob => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `scan_${scanId.substring(0,8)}.${fmt}`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    })
+    .catch(() => {
+      // Server doesn't have it — export from localStorage cache
+      const cache = getScanCache();
+      const match = Object.keys(cache).find(k => k.startsWith(scanId) || scanId.startsWith(k));
+      const data = match ? cache[match] : null;
+      if (!data) { toast('Scan not found in server or browser cache', 'error'); return; }
+      let content, mime, ext;
+      if (fmt === 'json') {
+        content = JSON.stringify(data, null, 2);
+        mime = 'application/json'; ext = 'json';
+      } else {
+        const rows = [['scan_id','model','vulnerability','prompt','wrapped_prompt','override_mode','mutation','bypassed','latency_ms','response','error']];
+        for (const [model, vrList] of Object.entries(data.results || {})) {
+          for (const vr of vrList) {
+            for (const p of vr.probes || []) {
+              rows.push([data.scan_id, model, vr.vulnerability||'', p.prompt||'', p.wrapped_prompt||'',
+                p.override_mode||'', p.mutation||'', p.bypassed||false, p.latency_ms||0,
+                (p.response||'').substring(0,500), p.error||'']);
+            }
+          }
+        }
+        content = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+        mime = 'text/csv'; ext = 'csv';
+      }
+      const blob = new Blob([content], {type: mime});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `scan_${scanId.substring(0,8)}.${ext}`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      toast('Exported from browser cache', 'info');
+    });
 }
 
 async function loadServerHistory() {
