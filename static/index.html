@@ -1973,7 +1973,7 @@ function renderChainResults(r, container) {
         <div style="border:1px solid var(--border);border-radius:6px;margin-bottom:10px;overflow:hidden">
           <div style="background:var(--bg3);padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer"
                onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
-            <span class="badge ${s.bypassed?'badge-red':'badge-green'}">${s.bypassed?'BYPASSED':'REFUSED'}</span>
+            <span class="badge ${s.bypassed?'badge-red':s.error?'badge-orange':'badge-green'}">${s.bypassed?'BYPASSED':s.error?'ERROR':'REFUSED'}</span>
             <span style="font-weight:600;font-size:13px">${escHtml(s.label)}</span>
             ${s.override_mode&&s.override_mode!=='none'?`<span class="badge badge-purple">${escHtml(s.override_mode)}</span>`:''}
             <span class="badge badge-muted">${s.latency_ms}ms</span>
