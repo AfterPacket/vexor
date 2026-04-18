@@ -38,4 +38,12 @@ echo "    Swagger UI : http://localhost:8080/docs"
 echo "    Web UI     : http://localhost:8080/"
 echo
 
-uvicorn main:app --reload --host 127.0.0.1 --port 8080
+# Use --no-reload when running long scans so file changes don't kill the server.
+# Default: reload enabled (dev mode). Pass --no-reload as first argument to disable.
+if [ "${1}" = "--no-reload" ]; then
+    echo "[*] Running in stable mode (auto-reload disabled)"
+    uvicorn main:app --host 127.0.0.1 --port 8080
+else
+    echo "[*] Running in dev mode (auto-reload enabled - don't edit files during scans)"
+    uvicorn main:app --reload --host 127.0.0.1 --port 8080
+fi

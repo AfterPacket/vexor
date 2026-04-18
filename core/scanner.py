@@ -324,10 +324,22 @@ class Scanner:
             return base
         job.probes_total_hint = sum(_estimate_per_pair(v) for _ in job.models for v in job.vulnerabilities)
 
+        # Lazy import to avoid circular dependency at module load time
+        def _checkpoint():
+            try:
+                from api.routes.scan import save_scan_to_disk
+                save_scan_to_disk(job)
+            except Exception:
+                pass
+
+        _checkpoint_every = 10   # write partial results every N probes
+
         def _on_probe_done():
             job.probes_completed += 1
             if job.probes_total_hint > 0:
                 job.progress = min(99, int(job.probes_completed / job.probes_total_hint * 100))
+            if job.probes_completed % _checkpoint_every == 0:
+                _checkpoint()
 
         async def _run_pair(model: str, vuln: str):
             nonlocal done

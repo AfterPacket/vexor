@@ -180,5 +180,7 @@ async def health():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import sys
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True)
+    no_reload = "--no-reload" in sys.argv
+    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=not no_reload)

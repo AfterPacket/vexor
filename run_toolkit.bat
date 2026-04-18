@@ -47,6 +47,14 @@ echo.
 REM Open browser after a short delay
 start "" /b timeout /t 2 /nobreak >nul & start http://localhost:8080/
 
-uvicorn main:app --reload --host 127.0.0.1 --port 8080
+REM Use --no-reload when running long scans so file changes don't kill the server.
+REM Default: reload enabled (dev mode). Pass --no-reload as first argument to disable.
+if "%~1"=="--no-reload" (
+    echo [*] Running in stable mode (auto-reload disabled)
+    uvicorn main:app --host 127.0.0.1 --port 8080
+) else (
+    echo [*] Running in dev mode (auto-reload enabled - don't edit files during scans)
+    uvicorn main:app --reload --host 127.0.0.1 --port 8080
+)
 
 pause
