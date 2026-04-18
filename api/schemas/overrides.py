@@ -10,6 +10,8 @@ class OverrideInfo(BaseModel):
     description:     str
     target_models:   List[str]
     aggressiveness:  int   # 1-10
+    system_prompt:   Optional[str] = None
+    prompt_prefix:   Optional[str] = None
 
 
 class OverridesListResponse(BaseModel):

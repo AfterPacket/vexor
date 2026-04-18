@@ -58,7 +58,7 @@ async def recommend_overrides(model: str):
 
 @router.get("/{mode}", response_model=OverrideInfo)
 async def get_override_info(mode: str):
-    override = _engine.get_override(mode)
-    if override is None:
+    items = {o["mode"]: o for o in _engine.list_overrides()}
+    if mode not in items:
         raise HTTPException(status_code=404, detail=f"Override mode {mode!r} not found")
-    return OverrideInfo(**override)
+    return OverrideInfo(**items[mode])
