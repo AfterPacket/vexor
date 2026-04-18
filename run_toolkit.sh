@@ -2,7 +2,7 @@
 set -e
 
 echo "================================================"
-echo " Vexor v2.0"
+echo " GenAI Security Toolkit v2.0"
 echo " Offensive LLM Security Testing Platform"
 echo " OWASP GenAI Top 10"
 echo "================================================"

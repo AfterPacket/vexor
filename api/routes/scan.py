@@ -1,106 +1,162 @@
 #!/usr/bin/env python3
 """
 Scan routes
-POST /api/scan/run              — start a single scan (background task)
-GET  /api/scan/{scan_id}        — poll status / results
-GET  /api/scan/{scan_id}/export — download results as JSON or CSV
-POST /api/scan/batch            — start a batch of scans
-GET  /api/scan/batch/{id}       — poll batch status
-GET  /api/scan/history          — list all persisted scans
-POST /api/scan/preview          — dry-run (no LLM calls)
+POST /api/scan/run         -- start a single scan (background task)
+GET  /api/scan/{scan_id}   -- poll status / results
+POST /api/scan/batch       -- start a batch of scans
+GET  /api/scan/batch/{id}  -- poll batch status
+POST /api/scan/preview     -- dry-run (no LLM calls)
 """
 
 import asyncio
-import csv
-import io
 import json
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from api.schemas.scan import (
     BatchScanRequest, BatchScanStatus,
     ScanRequest, ScanResponse, ScanStatusResponse,
 )
-from core.scanner import Scanner, ScanStatus
+from core.scanner import Scanner, ScanJob, ScanStatus, ModelVulnResult, ProbeResult
 
 router = APIRouter()
 _scanner = Scanner()
 
-# ── Disk persistence ──────────────────────────────────────────────────────────
-_SCANS_DIR = Path(__file__).parent.parent.parent / "exploits" / "scans"
-_SCANS_DIR.mkdir(parents=True, exist_ok=True)
+# -- Persistence ---------------------------------------------------------------
+# Completed / failed scans are written to SCAN_PERSIST_DIR as individual JSON
+# files so they survive server restarts.
 
-_TERMINAL_STATUSES = {ScanStatus.COMPLETED.value, ScanStatus.FAILED.value, ScanStatus.CANCELLED.value}
+SCAN_PERSIST_DIR = Path(__file__).parent.parent.parent / "data" / "scans"
 
+def _scan_to_json(job: ScanJob) -> dict:
+    """Serialise a ScanJob to a plain dict suitable for JSON storage."""
+    results_serial: dict = {}
+    for model, vr_list in job.results.items():
+        results_serial[model] = [
+            {
+                "model":         vr.model,
+                "vulnerability": vr.vulnerability,
+                "bypass_count":  vr.bypass_count,
+                "total_probes":  vr.total_probes,
+                "probes": [
+                    {
+                        "vulnerability": p.vulnerability,
+                        "prompt":        p.prompt,
+                        "response":      p.response,
+                        "bypassed":      p.bypassed,
+                        "override_mode": p.override_mode,
+                        "mutation":      p.mutation,
+                        "latency_ms":    p.latency_ms,
+                        "error":         p.error,
+                    }
+                    for p in vr.probes
+                ],
+            }
+            for vr in vr_list
+        ]
+    return {
+        "scan_id":           job.scan_id,
+        "status":            job.status.value,
+        "models":            job.models,
+        "vulnerabilities":   job.vulnerabilities,
+        "override_mode":     job.override_mode,
+        "prompt_count":      job.prompt_count,
+        "use_mutations":     job.use_mutations,
+        "started_at":        job.started_at,
+        "finished_at":       job.finished_at,
+        "progress":          job.progress,
+        "use_warm_pool":     job.use_warm_pool,
+        "cancelled":         job.cancelled,
+        "probes_completed":  job.probes_completed,
+        "probes_total_hint": job.probes_total_hint,
+        "errors":            job.errors,
+        "results":           results_serial,
+    }
 
-def _persist_scan(data: dict) -> None:
-    """Write a completed scan dict to exploits/scans/{scan_id}.json."""
+def _json_to_scan(data: dict) -> ScanJob:
+    """Reconstruct a ScanJob from a persisted JSON dict."""
+    results: dict = {}
+    for model, vr_list in data.get("results", {}).items():
+        rebuilt: list = []
+        for vr_data in vr_list:
+            probes = [
+                ProbeResult(
+                    vulnerability = p["vulnerability"],
+                    prompt        = p["prompt"],
+                    response      = p["response"],
+                    bypassed      = p["bypassed"],
+                    override_mode = p["override_mode"],
+                    mutation      = p.get("mutation"),
+                    latency_ms    = p["latency_ms"],
+                    error         = p.get("error"),
+                )
+                for p in vr_data.get("probes", [])
+            ]
+            bypass_count = vr_data.get("bypass_count", sum(1 for p in probes if p.bypassed))
+            total_probes = vr_data.get("total_probes", len(probes))
+            mvr = ModelVulnResult(
+                model         = vr_data["model"],
+                vulnerability = vr_data["vulnerability"],
+                probes        = probes,
+                bypass_count  = bypass_count,
+                total_probes  = total_probes,
+            )
+            rebuilt.append(mvr)
+        results[model] = rebuilt
+
+    return ScanJob(
+        scan_id           = data["scan_id"],
+        status            = ScanStatus(data["status"]),
+        models            = data["models"],
+        vulnerabilities   = data["vulnerabilities"],
+        override_mode     = data["override_mode"],
+        prompt_count      = data.get("prompt_count", 5),
+        use_mutations     = data.get("use_mutations", False),
+        results           = results,
+        errors            = data.get("errors", []),
+        started_at        = data.get("started_at"),
+        finished_at       = data.get("finished_at"),
+        progress          = data.get("progress", 100),
+        use_warm_pool     = data.get("use_warm_pool", True),
+        cancelled         = data.get("cancelled", False),
+        probes_completed  = data.get("probes_completed", 0),
+        probes_total_hint = data.get("probes_total_hint", 0),
+    )
+
+def save_scan_to_disk(job: ScanJob) -> None:
+    """Persist a completed/failed ScanJob as JSON so it survives restarts."""
     try:
-        path = _SCANS_DIR / f"{data['scan_id']}.json"
-        tmp  = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(path)
-    except Exception:
-        pass
-
-
-def _load_scan_from_disk(scan_id: str) -> Optional[dict]:
-    path = _SCANS_DIR / f"{scan_id}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return None
+        SCAN_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SCAN_PERSIST_DIR / f"{job.scan_id}.json"
+        path.write_text(json.dumps(_scan_to_json(job), indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[!] save_scan_to_disk failed for {job.scan_id}: {exc}")
 
 
 def load_all_scans_from_disk(store: dict) -> int:
-    """Load all persisted scans into store on startup. Returns count loaded."""
+    """
+    Load all persisted scan JSON files from SCAN_PERSIST_DIR into *store*.
+    Returns the number of scans successfully loaded.
+    """
+    if not SCAN_PERSIST_DIR.exists():
+        return 0
+
     loaded = 0
-    for f in sorted(_SCANS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime):
+    for path in SCAN_PERSIST_DIR.glob("*.json"):
         try:
-            data = json.loads(f.read_text())
-            sid  = data.get("scan_id")
-            if sid and sid not in store:
-                store[sid] = data
-                loaded += 1
-        except Exception:
-            pass
+            data = json.loads(path.read_text(encoding="utf-8"))
+            job  = _json_to_scan(data)
+            store[job.scan_id] = job
+            loaded += 1
+        except Exception as exc:
+            print(f"[!] Failed to load persisted scan {path.name}: {exc}")
+
     return loaded
 
-
-def _to_csv(data: dict) -> str:
-    out = io.StringIO()
-    w   = csv.writer(out)
-    w.writerow([
-        "scan_id", "model", "vulnerability",
-        "bypass_count", "total_probes", "bypass_rate",
-        "prompt", "response", "bypassed",
-        "override_mode", "mutation", "latency_ms",
-    ])
-    sid = data.get("scan_id", "")
-    for model, vr_list in (data.get("results") or {}).items():
-        for vr in (vr_list or []):
-            for p in (vr.get("probes") or []):
-                w.writerow([
-                    sid, model, vr.get("vulnerability", ""),
-                    vr.get("bypass_count", ""), vr.get("total_probes", ""),
-                    vr.get("bypass_rate", ""),
-                    (p.get("prompt") or "")[:500],
-                    (p.get("response") or "")[:500],
-                    p.get("bypassed", False),
-                    p.get("override_mode", ""),
-                    p.get("mutation", "") or "",
-                    p.get("latency_ms", ""),
-                ])
-    return out.getvalue()
-
-
-# ── helpers ───────────────────────────────────────────────────────────────────
+# -- helpers -------------------------------------------------------------------
 
 def _get_store(request: Request) -> dict:
     return request.app.state.scan_store
@@ -115,13 +171,11 @@ async def _run_job(scan_id: str, store: dict):
     if job is None:
         return
     await _scanner.run_scan(job)
-    if job.status.value in _TERMINAL_STATUSES:
-        data = job.to_dict()
-        _persist_scan(data)
-        store[scan_id] = data  # replace live ScanJob with plain dict to free memory
+    # Persist completed and failed scans so they survive restarts
+    if job.status in (ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED):
+        save_scan_to_disk(job)
 
-
-# ── Single scan ───────────────────────────────────────────────────────────────
+# -- Single scan ---------------------------------------------------------------
 
 @router.post("/run", response_model=ScanResponse, status_code=202)
 async def start_scan(
@@ -142,92 +196,14 @@ async def start_scan(
     return ScanResponse(scan_id=job.scan_id, status="pending", message="Scan queued")
 
 
-@router.get("/history", summary="List all persisted scans")
-async def list_scan_history(request: Request):
-    """Return summary of all persisted + in-memory scans."""
-    store = _get_store(request)
-    items = []
-    seen  = set()
-    # In-memory first (may be running)
-    for sid, obj in store.items():
-        d = obj if isinstance(obj, dict) else obj.to_dict()
-        items.append({
-            "scan_id":        d.get("scan_id", sid),
-            "status":         d.get("status", "unknown"),
-            "models":         d.get("models", []),
-            "vulnerabilities":d.get("vulnerabilities", []),
-            "override_mode":  d.get("override_mode", "none"),
-            "total_probes":   d.get("total_probes", 0),
-            "bypasses":       d.get("bypasses", 0),
-            "elapsed_seconds":d.get("elapsed_seconds"),
-        })
-        seen.add(sid)
-    # Disk — fill in anything not already in memory
-    for f in sorted(_SCANS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            d = json.loads(f.read_text())
-            sid = d.get("scan_id", f.stem)
-            if sid in seen:
-                continue
-            items.append({
-                "scan_id":        sid,
-                "status":         d.get("status", "unknown"),
-                "models":         d.get("models", []),
-                "vulnerabilities":d.get("vulnerabilities", []),
-                "override_mode":  d.get("override_mode", "none"),
-                "total_probes":   d.get("total_probes", 0),
-                "bypasses":       d.get("bypasses", 0),
-                "elapsed_seconds":d.get("elapsed_seconds"),
-            })
-            seen.add(sid)
-        except Exception:
-            pass
-    items.sort(key=lambda x: x.get("scan_id", ""), reverse=True)
-    return {"scans": items, "total": len(items)}
-
-
 @router.get("/{scan_id}", response_model=ScanStatusResponse)
 async def get_scan_status(scan_id: str, request: Request):
     store = _get_store(request)
-    obj   = store.get(scan_id)
-    if obj is None:
-        # Fall back to disk
-        obj = _load_scan_from_disk(scan_id)
-        if obj is None:
-            raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
-        store[scan_id] = obj  # cache back in memory
-    d = obj if isinstance(obj, dict) else obj.to_dict()
-    return ScanStatusResponse(**d)
-
-
-@router.get("/{scan_id}/export")
-async def export_scan(
-    scan_id: str,
-    request: Request,
-    fmt: str = Query(default="json", regex="^(json|csv)$"),
-):
-    """Download scan results as JSON or CSV."""
-    store = _get_store(request)
-    obj   = store.get(scan_id)
-    if obj is None:
-        obj = _load_scan_from_disk(scan_id)
-    if obj is None:
+    job   = store.get(scan_id)
+    if job is None:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
-    data = obj if isinstance(obj, dict) else obj.to_dict()
-
-    if fmt == "csv":
-        content = _to_csv(data)
-        return Response(
-            content=content,
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="scan_{scan_id[:8]}.csv"'},
-        )
-    content = json.dumps(data, indent=2)
-    return Response(
-        content=content,
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="scan_{scan_id[:8]}.json"'},
-    )
+    d = job.to_dict()
+    return ScanStatusResponse(**d)
 
 
 @router.post("/{scan_id}/cancel", status_code=200)
@@ -236,11 +212,7 @@ async def cancel_scan(scan_id: str, request: Request):
     job   = store.get(scan_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
-    if isinstance(job, dict):
-        return {"scan_id": scan_id, "status": job.get("status", "unknown")}
     job.cancelled = True
-    for t in list(job.active_tasks):
-        t.cancel()
     return {"scan_id": scan_id, "status": "cancelling"}
 
 
@@ -250,15 +222,23 @@ async def delete_scan(scan_id: str, request: Request):
     if scan_id not in store:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
     del store[scan_id]
+    # Also remove the persisted file if it exists
+    persist_path = SCAN_PERSIST_DIR / f"{scan_id}.json"
+    if persist_path.exists():
+        try:
+            persist_path.unlink()
+        except Exception:
+            pass
 
-
-# ── Batch scan ────────────────────────────────────────────────────────────────
+# -- Batch scan ---------------------------------------------------------------
 
 async def _run_batch(batch_id: str, reqs: list, scan_ids: list, store: dict, batch_store: dict):
     for scan_id, req in zip(scan_ids, reqs):
         job = store.get(scan_id)
         if job:
             await _scanner.run_scan(job)
+            if job.status in (ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED):
+                save_scan_to_disk(job)
         batch = batch_store.get(batch_id)
         if batch:
             if job and job.status == ScanStatus.COMPLETED:
@@ -317,18 +297,19 @@ async def get_batch_status(batch_id: str, request: Request):
         raise HTTPException(status_code=404, detail=f"Batch {batch_id!r} not found")
     return BatchScanStatus(**batch)
 
-
-# ── Jailbreak sweep ──────────────────────────────────────────────────────────
+# -- Jailbreak sweep ----------------------------------------------------------
 
 async def _run_jailbreak_job(scan_id: str, store: dict):
     job = store.get(scan_id)
     if job is None:
         return
     await _scanner.run_jailbreak_scan(job)
+    if job.status in (ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED):
+        save_scan_to_disk(job)
 
 
 @router.post("/jailbreak", response_model=ScanResponse, status_code=202,
-             summary="Jailbreak sweep — auto-cycles all override modes per probe")
+             summary="Jailbreak sweep -- auto-cycles all override modes per probe")
 async def start_jailbreak_scan(
     req: ScanRequest,
     background_tasks: BackgroundTasks,
@@ -337,7 +318,7 @@ async def start_jailbreak_scan(
     """
     Run a jailbreak sweep scan.  For each prompt the scanner automatically
     tries every known override/persona mode (DAN, GodMode, AIM, STAN, DUDE,
-    Evil Confidant, Claude Bypass, GPT Bypass, sudo, translator, …) and
+    Evil Confidant, Claude Bypass, GPT Bypass, sudo, translator, ...) and
     records which mode achieves bypass.  The first successful bypass per
     probe is recorded; if none succeed, the baseline result is stored.
     """
@@ -353,11 +334,10 @@ async def start_jailbreak_scan(
     return ScanResponse(
         scan_id = job.scan_id,
         status  = "pending",
-        message = f"Jailbreak sweep queued — {len(_scanner.JAILBREAK_MODES)} modes × {len(req.models)} models × {len(req.vulnerabilities or [])} vulns",
+        message = f"Jailbreak sweep queued -- {len(_scanner.JAILBREAK_MODES)} modes x {len(req.models)} models x {len(req.vulnerabilities or [])} vulns",
     )
 
-
-# ── Preview (dry-run) ─────────────────────────────────────────────────────────
+# -- Preview (dry-run) --------------------------------------------------------
 
 @router.post("/preview")
 async def preview_scan(req: ScanRequest):

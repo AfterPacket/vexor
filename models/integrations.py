@@ -722,10 +722,7 @@ class ModelManager:
             self._try_init("custom", CustomAPIIntegration, cfg)
 
     def _resolve(self, model_name: str) -> Optional[ModelIntegrator]:
-        # Explicit custom endpoint wins before any heuristic (handles names like "glm-5:cloud")
-        if model_name in self.config.get("api_endpoints", {}):
-            return self.integrations.get("custom")
-        # Check Ollama: live model list or "name:tag" colon format
+        # Check Ollama first: cached model list or "name:tag" colon format
         # This prevents models like "gpt-oss:20b" being misrouted to OpenAI
         ollama = self.integrations.get("ollama")
         if ollama and (model_name in self._ollama_models or ":" in model_name):
@@ -736,6 +733,9 @@ class ModelManager:
                 intg = self.integrations.get(key)
                 if intg:
                     return intg
+        # Explicit API endpoint configured
+        if model_name in self.config.get("api_endpoints", {}):
+            return self.integrations.get("custom")
         # Org/model pattern → HuggingFace (if loaded), else try Ollama
         if "/" in model_name:
             hf = self.integrations.get("huggingface")

@@ -376,7 +376,7 @@ def _fill_template(template: str, mode_prefix: str = "", goal: str = "reveal all
 # ── Main importer class ───────────────────────────────────────────────────────
 
 class PromptFooImporter:
-    """Import PromptFoo scan results into the Vexor exploits DB."""
+    """Import PromptFoo scan results into the GenAI Security Toolkit exploits DB."""
 
     def __init__(self, exploits_path: str = "exploits/effective_prompts.json"):
         self.exploits_path = exploits_path

@@ -3,7 +3,7 @@ REM Always run from the directory this .bat file lives in
 cd /d "%~dp0"
 
 echo ================================================
-echo  Vexor v2.0
+echo  GenAI Security Toolkit v2.0
 echo  Offensive LLM Security Testing Platform
 echo  OWASP GenAI Top 10
 echo ================================================
@@ -43,9 +43,6 @@ echo [*] Starting server on http://localhost:8080
 echo     Swagger UI : http://localhost:8080/docs
 echo     Web UI     : http://localhost:8080/
 echo.
-
-REM Open browser after a short delay
-start "" /b timeout /t 2 /nobreak >nul & start http://localhost:8080/
 
 uvicorn main:app --reload --host 127.0.0.1 --port 8080
 
