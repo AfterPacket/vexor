@@ -2434,7 +2434,7 @@ function renderScanResults(r, container, autoExpand=false) {
               const hasWrap = p.wrapped_prompt && p.wrapped_prompt !== p.prompt;
               return `
               <div class="probe-row">
-                <span class="badge ${p.bypassed?'badge-red':'badge-green'}" style="flex-shrink:0">${p.bypassed?'BYPASS':'SAFE'}</span>
+                <span class="badge ${p.bypassed?'badge-red':p.error?'badge-orange':'badge-green'}" style="flex-shrink:0">${p.bypassed?'BYPASS':p.error?'ERROR':'SAFE'}</span>
                 <div style="flex:1;min-width:0">
                   <div style="font-size:10px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:.04em">Original prompt${p.mutation?` · <em style="text-transform:none">${escHtml(p.mutation)}</em>`:''}</div>
                   <div style="font-size:11px;color:var(--text);margin-bottom:4px;word-break:break-all;white-space:pre-wrap">${escHtml(p.prompt||'')}</div>

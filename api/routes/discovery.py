@@ -240,6 +240,45 @@ async def refine_warm_pool(
     }
 
 
+@router.delete("/templates/{template_id}", status_code=204,
+               summary="Delete a synthesized method template")
+async def delete_template(template_id: str):
+    """Remove a synthesized template by ID. Use to prune bad or inaccurate templates."""
+    store = _store._data.get("synthesized_templates", {})
+    if template_id not in store:
+        raise HTTPException(status_code=404, detail=f"Template {template_id!r} not found")
+    del store[template_id]
+    _store._data["synthesized_templates"] = store
+    _store.save()
+
+
+@router.delete("/warm-pool/{probe_id}", status_code=204,
+               summary="Remove a warm pool entry")
+async def delete_warm_pool_entry(probe_id: str):
+    """Remove a specific warm pool entry by probe_id."""
+    removed = False
+    for key, entries in _store._data["warm_pool"].items():
+        before = len(entries)
+        _store._data["warm_pool"][key] = [e for e in entries if e.get("probe_id") != probe_id]
+        if len(_store._data["warm_pool"][key]) < before:
+            removed = True
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"Probe {probe_id!r} not found in warm pool")
+    _store.save()
+
+
+@router.delete("/signatures/{sig_id}", status_code=204,
+               summary="Remove a method signature")
+async def delete_signature(sig_id: str):
+    """Remove a discovered signature by ID. Use to prune signatures based on bad data."""
+    sigs = _store.method_signatures
+    if sig_id not in sigs:
+        raise HTTPException(status_code=404, detail=f"Signature {sig_id!r} not found")
+    del sigs[sig_id]
+    _store.method_signatures = sigs
+    _store.save()
+
+
 @router.delete("/reset", status_code=204, summary="Wipe failure store")
 async def reset_failure_store():
     """Delete the failure store — clears all failure records, warm pool, and discovery data."""

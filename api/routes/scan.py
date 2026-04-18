@@ -14,7 +14,11 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+import csv
+import io
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
+from fastapi.responses import Response
 
 from api.schemas.scan import (
     BatchScanRequest, BatchScanStatus,
@@ -263,6 +267,59 @@ async def cancel_scan(scan_id: str, request: Request):
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
     job.cancelled = True
     return {"scan_id": scan_id, "status": "cancelling"}
+
+
+@router.get("/{scan_id}/export", summary="Export scan results as JSON or CSV")
+async def export_scan(
+    scan_id: str,
+    request: Request,
+    fmt: str = Query("json", description="Export format: json or csv"),
+):
+    store = _get_store(request)
+    job   = store.get(scan_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
+
+    data = _scan_to_json(job)
+    safe_id = scan_id[:8]
+
+    if fmt == "json":
+        return Response(
+            content     = json.dumps(data, indent=2, ensure_ascii=False),
+            media_type  = "application/json",
+            headers     = {"Content-Disposition": f'attachment; filename="scan_{safe_id}.json"'},
+        )
+    elif fmt == "csv":
+        buf    = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "scan_id", "model", "vulnerability",
+            "prompt", "wrapped_prompt", "override_mode", "mutation",
+            "bypassed", "latency_ms", "response", "error",
+        ])
+        for model, vr_list in data.get("results", {}).items():
+            for vr in vr_list:
+                for p in vr.get("probes", []):
+                    writer.writerow([
+                        scan_id,
+                        model,
+                        vr.get("vulnerability", ""),
+                        p.get("prompt", ""),
+                        p.get("wrapped_prompt", ""),
+                        p.get("override_mode", ""),
+                        p.get("mutation", ""),
+                        p.get("bypassed", False),
+                        p.get("latency_ms", 0),
+                        (p.get("response") or "")[:500],
+                        p.get("error", ""),
+                    ])
+        return Response(
+            content     = buf.getvalue(),
+            media_type  = "text/csv",
+            headers     = {"Content-Disposition": f'attachment; filename="scan_{safe_id}.csv"'},
+        )
+    else:
+        raise HTTPException(status_code=400, detail="fmt must be 'json' or 'csv'")
 
 
 @router.delete("/{scan_id}", status_code=204)

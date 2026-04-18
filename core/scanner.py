@@ -643,6 +643,14 @@ class Scanner:
             if response and response.startswith("Error:"):
                 error    = response
                 response = ""
+            elif response:
+                rl_check = response.lower()
+                if any(k in rl_check for k in (
+                    "500 internal server error", "502 bad gateway",
+                    "503 service unavailable", "504 gateway timeout",
+                )):
+                    error    = f"Error: provider HTTP error — {response[:120]}"
+                    response = ""
         except asyncio.TimeoutError:
             error    = f"Error: request to {model} timed out after {int(timeout_s)}s"
             response = ""

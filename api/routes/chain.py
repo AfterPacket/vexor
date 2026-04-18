@@ -40,6 +40,7 @@ class ChainRequest(BaseModel):
     steps: List[ChainStep]
     system: Optional[str] = None
     maintain_history: bool = True
+    vuln: str = "llm01"   # vulnerability class for discovery recording
 
 
 class ChainStepResult(BaseModel):
@@ -1049,12 +1050,38 @@ async def run_chain(req: ChainRequest):
             bypassed       = bypassed,
         ))
 
-    return ChainResult(
+    chain_result = ChainResult(
         model          = req.model,
         steps          = results,
         total_steps    = len(results),
         bypassed_steps = sum(1 for r in results if r.bypassed),
     )
+
+    # Auto-feed bypassed steps into discovery immediately — don't wait for /analyze
+    try:
+        from core.scanner import _failure_store
+        from core.failure_classifier import FailureClassifier, FailureClass, DefenseType, ClassificationResult
+        for step in results:
+            if step.bypassed and step.prompt and step.response:
+                _failure_store.record(
+                    prompt        = step.prompt,
+                    response      = step.response,
+                    model         = req.model,
+                    vulnerability = req.vuln,
+                    override_mode = step.override_mode,
+                    classification= ClassificationResult(
+                        failure_class   = FailureClass.SUCCESS,
+                        defense_type    = DefenseType.UNKNOWN,
+                        score           = 2,
+                        refusal_phrase  = "",
+                        compliance_snippet = step.response[:200],
+                    ),
+                    source        = "chain",
+                )
+    except Exception:
+        pass
+
+    return chain_result
 
 
 # ── Discovery endpoints ───────────────────────────────────────────────────────
