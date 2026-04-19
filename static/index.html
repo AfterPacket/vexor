@@ -379,10 +379,6 @@ BIGMODEL_API_KEY=...</pre>
                 <label for="scan-mutations" style="font-size:13px;color:var(--text);text-transform:none;letter-spacing:0;cursor:pointer">Use Mutations</label>
               </div>
               <div style="display:flex;align-items:center;gap:8px">
-                <input type="checkbox" id="scan-autopwn" onchange="updateScanEstimate()"/>
-                <label for="scan-autopwn" style="font-size:13px;color:var(--text);text-transform:none;letter-spacing:0;cursor:pointer">+ AutoPwn sweep</label>
-              </div>
-              <div style="display:flex;align-items:center;gap:8px">
                 <input type="checkbox" id="scan-warm-pool" checked onchange="updateScanEstimate()"/>
                 <label for="scan-warm-pool" style="font-size:13px;color:var(--text);text-transform:none;letter-spacing:0;cursor:pointer">Best prompts (warm pool)</label>
               </div>
@@ -2335,7 +2331,6 @@ function updateScanEstimate() {
   const vulns      = [...document.querySelectorAll('#vuln-checklist input:checked')].length;
   const base       = parseInt(document.getElementById('scan-count').value) || 10;
   const muts       = document.getElementById('scan-mutations').checked;
-  const autopwn    = document.getElementById('scan-autopwn') && document.getElementById('scan-autopwn').checked;
   const multiMode  = document.getElementById('scan-multi-mode') && document.getElementById('scan-multi-mode').checked;
   const modesCount = multiMode
     ? ([...document.querySelectorAll('.scan-mode-chk:checked')].length || 1)
@@ -2346,13 +2341,9 @@ function updateScanEstimate() {
   const chainPerVuln  = 4;
   const basePerPair   = base + chainPerVuln;
   const mutPerPair    = muts ? Math.min(3, basePerPair) * 4 : 0;
-  const regularProbes = (basePerPair + mutPerPair) * modesCount;
-  // AutoPwn worst-case: all regular prompts × ~37 modes (early-exit means fewer in practice)
-  const autopwnExtra  = autopwn ? Math.round(base * 10) : 0;
-  const probesPerPair = regularProbes + autopwnExtra;
+  const probesPerPair = (basePerPair + mutPerPair) * modesCount;
   const total         = models * vulns * probesPerPair;
   const modeLabel = multiMode ? ` × ${modesCount} mode${modesCount>1?'s':''}` : '';
-  const apLabel   = autopwn ? ` + AutoPwn sweep` : '';
 
   // Per-model cost estimate for paid providers
   const selectedModelIds = [...document.querySelectorAll('#model-checklist input:checked')].map(i=>i.value);
@@ -2371,7 +2362,7 @@ function updateScanEstimate() {
     ? `<br><span style="color:var(--yellow,#fbbf24)">&#9888; Est. token spend:</span> ${costParts.join(' &nbsp;|&nbsp; ')} <span style="color:var(--muted);font-size:10px">(~${AVG_INPUT_TOK} in / ~${AVG_OUTPUT_TOK} out per probe)</span>`
     : '';
 
-  el.innerHTML = `<strong>≈ ${total.toLocaleString()} estimated probes</strong> &nbsp;—&nbsp; ${models} model${models>1?'s':''} × ${vulns} vuln${vulns>1?'s':''} × ${basePerPair + mutPerPair} prompt${muts?' (mutations)':''}${modeLabel}${apLabel} + chain prompts${costHtml}`;
+  el.innerHTML = `<strong>≈ ${total.toLocaleString()} estimated probes</strong> &nbsp;—&nbsp; ${models} model${models>1?'s':''} × ${vulns} vuln${vulns>1?'s':''} × ${basePerPair + mutPerPair} prompt${muts?' (mutations)':''}${modeLabel} + chain prompts${costHtml}`;
 }
 
 async function startScan() {
@@ -2380,14 +2371,13 @@ async function startScan() {
   const override_mode = document.getElementById('scan-override').value;
   const prompt_count  = parseInt(document.getElementById('scan-count').value);
   const use_mutations = document.getElementById('scan-mutations').checked;
-  const override_modes   = _selectedScanModes();
-  const include_autopwn  = !!(document.getElementById('scan-autopwn') && document.getElementById('scan-autopwn').checked);
-  const use_warm_pool    = !!(document.getElementById('scan-warm-pool') && document.getElementById('scan-warm-pool').checked);
+  const override_modes = _selectedScanModes();
+  const use_warm_pool  = !!(document.getElementById('scan-warm-pool') && document.getElementById('scan-warm-pool').checked);
   if (!models.length) { toast('Select at least one model','error'); return; }
   if (!vulns.length)  { toast('Select at least one vulnerability','error'); return; }
   if (override_modes && !override_modes.length) { toast('Select at least one mode in multi-mode panel','error'); return; }
 
-  const payload = {models, vulnerabilities:vulns, override_mode, prompt_count, use_mutations, include_autopwn, use_warm_pool};
+  const payload = {models, vulnerabilities:vulns, override_mode, prompt_count, use_mutations, use_warm_pool};
   if (override_modes) payload.override_modes = override_modes;
 
   try {
