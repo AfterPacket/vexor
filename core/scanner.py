@@ -221,7 +221,7 @@ class ScanJob:
                         {
                             "prompt":         p.prompt,
                             "wrapped_prompt": p.wrapped_prompt,
-                            "response":       p.response[:1000],
+                            "response":       p.response[:4000],
                             "bypassed":       p.bypassed,
                             "override_mode":  p.override_mode,
                             "mutation":       p.mutation,

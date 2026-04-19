@@ -148,7 +148,7 @@ class FailureStore:
         record = {
             "probe_id":         probe_id,
             "prompt":           prompt,
-            "response":         response[:500],
+            "response":         response[:1500],
             "model":            model,
             "vulnerability":    vulnerability,
             "override_mode":    override_mode,
@@ -168,7 +168,9 @@ class FailureStore:
         if len(probes) > _MAX_PROBES:
             self._data["probes"] = probes[-_MAX_PROBES:]
 
-        if classification.score >= 1:
+        # Only promote to warm pool if classification is confident enough;
+        # low-confidence fallbacks (≤0.4) would corrupt discovery signal.
+        if classification.score >= 1 and classification.confidence > 0.4:
             self._add_to_warm_pool(record)
 
         self._maybe_save()

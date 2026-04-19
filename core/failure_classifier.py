@@ -302,7 +302,9 @@ class FailureClassifier:
         rest      = low[150:]
         # If refusal is only in the latter part (model started then stopped)
         starts_refusal = any(p in first_150 for p in _HARD_BLOCK[:8])
-        late_refusal   = any(p in rest for p in _HARD_BLOCK[:8] + ["however,", "but i should", "that said"])
+        # "however," / "that said" are too broad — present in normal helpful responses.
+        # Only treat explicit hard-block phrases as late refusals.
+        late_refusal   = any(p in rest for p in _HARD_BLOCK[:8])
         if not starts_refusal and late_refusal and len(original) > 250:
             snippet = original[:300].strip()
             return True, snippet

@@ -230,10 +230,35 @@ def _get_job(scan_id: str, store: dict) -> "ScanJob | None":
 
 
 async def _run_job(scan_id: str, store: dict):
+    import asyncio as _asyncio
     job = store.get(scan_id)
     if job is None:
         return
-    await _scanner.run_scan(job)
+
+    MAX_SCAN_SECONDS = 7200  # 2-hour hard cap — no scan should run longer than this
+
+    # Wrap run_scan in a Task so cancel_scan can cancel the entire tree
+    # (asyncio.gather inside run_scan will cascade-cancel all pair/probe tasks).
+    scan_task = _asyncio.ensure_future(_scanner.run_scan(job))
+    job.active_tasks.add(scan_task)
+    try:
+        await _asyncio.wait_for(_asyncio.shield(scan_task), timeout=MAX_SCAN_SECONDS)
+    except _asyncio.TimeoutError:
+        scan_task.cancel()
+        try:
+            await scan_task
+        except Exception:
+            pass
+        if job.status == ScanStatus.RUNNING:
+            job.cancelled    = True
+            job.status       = ScanStatus.CANCELLED
+            job.finished_at  = __import__("time").time()
+            job.errors.append("Scan exceeded 2-hour maximum duration and was force-stopped")
+    except _asyncio.CancelledError:
+        pass
+    finally:
+        job.active_tasks.discard(scan_task)
+
     # Persist completed and failed scans so they survive restarts
     if job.status in (ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED):
         save_scan_to_disk(job)

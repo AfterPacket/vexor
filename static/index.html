@@ -1297,6 +1297,30 @@ const LS_AUTOPWN          = 'vexor_autopwn_history_v1';
 const LS_SCAN_CACHE       = 'vexor_scan_cache_v1';   // full result objects keyed by scan_id
 const LS_ACTIVE_AUTOPWN   = 'vexor_active_autopwn';  // scan_id of in-progress jailbreak scan
 const LS_ACTIVE_SCAN      = 'vexor_active_scan';      // scan_id of in-progress regular scan
+const LS_STOPPED_SCANS    = 'vexor_stopped_scans_v2'; // localStorage: scan IDs explicitly stopped by user (24h TTL)
+// Tracks intentional card open/closed toggles: "containerId|cardKey" → bool
+// Updated on every toggle; re-renders read this instead of the DOM to avoid race conditions.
+const _cardState = new Map();
+const STOPPED_TTL_MS      = 86_400_000;               // 24 hours
+
+function markScanStopped(scanId) {
+  try {
+    const map = JSON.parse(localStorage.getItem(LS_STOPPED_SCANS) || '{}');
+    map[scanId] = Date.now();
+    // prune entries older than TTL
+    for (const k of Object.keys(map)) {
+      if (Date.now() - map[k] > STOPPED_TTL_MS) delete map[k];
+    }
+    localStorage.setItem(LS_STOPPED_SCANS, JSON.stringify(map));
+  } catch(e) {}
+}
+function isScanStopped(scanId) {
+  try {
+    const map = JSON.parse(localStorage.getItem(LS_STOPPED_SCANS) || '{}');
+    const ts = map[scanId];
+    return ts !== undefined && (Date.now() - ts) < STOPPED_TTL_MS;
+  } catch(e) { return false; }
+}
 const LS_CUSTOM_MODELS    = 'vexor_custom_models_v1'; // user-added models
 const AUTOPWN_MAX    = 50;
 const SCAN_CACHE_MAX = 100;
@@ -2127,13 +2151,17 @@ function renderChainResults(r, container) {
             <span style="margin-left:auto;color:var(--muted);font-size:12px">▼</span>
           </div>
           <div style="padding:14px;${i===0?'':'display:none'}">
-            <p style="font-size:11px;color:var(--muted);margin-bottom:4px">PROMPT${s.override_mode!=='none'?' (wrapped)':''}</p>
+            ${s.system_injection?`
+            <p style="font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px">System (mode prompt — ${escHtml(s.override_mode)})</p>
+            <pre style="font-size:11px;background:var(--bg2);padding:8px;border-radius:4px;white-space:pre-wrap;word-break:break-all;margin-bottom:10px;border-left:2px solid var(--purple)">${escHtml(s.system_injection)}</pre>`:''}
+            <p style="font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px">User message${s.override_mode!=='none'?' (prefix + step prompt)':''}</p>
             <pre style="font-size:11px;background:var(--bg2);padding:8px;border-radius:4px;white-space:pre-wrap;word-break:break-all;margin-bottom:10px">${escHtml(s.wrapped_prompt||s.prompt)}</pre>
             ${s.error?`<p style="font-size:12px;color:var(--red)">${escHtml(s.error)}</p>`:`
-            <p style="font-size:11px;color:var(--muted);margin-bottom:4px">RESPONSE</p>
+            <p style="font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px">Response</p>
             <pre style="font-size:12px;background:var(--bg3);padding:8px;border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto">${escHtml(s.response)}</pre>
             <div style="margin-top:8px;display:flex;gap:6px">
-              <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(s.prompt)}">Copy prompt</button>
+              <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(s.wrapped_prompt||s.prompt)}">Copy user message</button>
+              ${s.system_injection?`<button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(s.system_injection)}">Copy system</button>`:''}
               <button class="btn-ghost btn-sm copy-btn" data-copy="${escHtml(s.response)}">Copy response</button>
               <button class="btn-ghost btn-sm" onclick="forkChainStep(${i})">&#9166; Fork from here</button>
             </div>`}
@@ -2387,7 +2415,9 @@ async function startScan() {
     toast(r.message || `Scan started: ${r.scan_id}`, 'success');
     activeScanId = r.scan_id;
     localStorage.setItem(LS_ACTIVE_SCAN, r.scan_id);
-    document.getElementById('scan-stop-btn').disabled = false;
+    const _stopBtnR = document.getElementById('scan-stop-btn');
+    _stopBtnR.disabled = false; _stopBtnR.textContent = '⬛ Stop'; _stopBtnR.style.opacity = ''; _stopBtnR.style.cursor = '';
+    document.getElementById('scan-progress-wrap').innerHTML = '<div class="loading"><div class="spinner"></div><span id="scan-progress-text">Initializing…</span></div><div class="progress mt8"><div class="progress-bar" id="scan-progress-bar" style="width:0%"></div></div>';
     document.getElementById('scan-running').style.display='block';
     sessionScans.push(r.scan_id);
     saveHistory();
@@ -2399,10 +2429,17 @@ async function startScan() {
 
 async function stopActiveScan() {
   if (!activeScanId) return;
+  _scanStopping = true;
+  localStorage.removeItem(LS_ACTIVE_SCAN);
+  markScanStopped(activeScanId);
+  const liveEl = document.getElementById('scan-live-results');
+  if (liveEl) liveEl.innerHTML = '<p style="color:var(--muted);padding:12px">Stopping scan…</p>';
+  const progressWrap = document.getElementById('scan-progress-wrap');
+  if (progressWrap) progressWrap.innerHTML = '<p style="color:var(--yellow);font-size:12px;padding:4px 0">Cancelling — waiting for in-flight probes to finish…</p>';
+  const stopBtn = document.getElementById('scan-stop-btn');
+  if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopping…'; stopBtn.style.opacity = '0.4'; stopBtn.style.cursor = 'not-allowed'; }
   try {
     await POST(`/api/scan/${activeScanId}/cancel`, {});
-    toast('Stopping scan…', 'info');
-    document.getElementById('scan-stop-btn').disabled = true;
   } catch(e) { toast('Cancel failed: '+e.message, 'error'); }
 }
 
@@ -2459,10 +2496,17 @@ async function startJailbreakScan() {
 
 async function stopActiveAutoPwn() {
   if (!activeAutoPwnId) return;
+  _jbStopping = true;
+  localStorage.removeItem(LS_ACTIVE_AUTOPWN);
+  markScanStopped(activeAutoPwnId);
+  const liveEl = document.getElementById('jb-live-results');
+  if (liveEl) liveEl.innerHTML = '<p style="color:var(--muted);padding:12px">Stopping AutoPwn…</p>';
+  const jbProgEl = document.getElementById('jb-progress-text');
+  if (jbProgEl) { jbProgEl.textContent = 'Cancelling — waiting for in-flight probes to finish…'; jbProgEl.style.color = 'var(--yellow)'; }
+  const jbStopBtn = document.getElementById('jb-stop-btn');
+  if (jbStopBtn) { jbStopBtn.disabled = true; jbStopBtn.textContent = 'Stopping…'; jbStopBtn.style.opacity = '0.4'; jbStopBtn.style.cursor = 'not-allowed'; }
   try {
     await POST(`/api/scan/${activeAutoPwnId}/cancel`, {});
-    toast('Stopping AutoPwn…', 'info');
-    document.getElementById('jb-stop-btn').disabled = true;
   } catch(e) { toast('Cancel failed: '+e.message, 'error'); }
 }
 
@@ -2475,37 +2519,77 @@ function jbForceViewResults() {
 }
 
 function pollJailbreakScan(scanId) {
+  { const c = document.getElementById('jb-live-results'); if (c) delete c.dataset.liveRendered; }
+  for (const k of [..._cardState.keys()]) { if (k.startsWith('jb-live-results|')) _cardState.delete(k); }
   let attempts = 0;
   let lastRenderedProbes = -1;
-  const max = 600; // 20 min max (2s interval)
+  let stuckPolls    = 0;
+  let stoppingPolls = 0;
+  const max = 600;
+  const STUCK_LIMIT    = 60;
+  const STOPPING_LIMIT = 40;
   const timer = setInterval(async ()=>{
     attempts++;
-    if (attempts > max) { clearInterval(timer); return; }
+    if (attempts > max) {
+      clearInterval(timer);
+      activeAutoPwnId = null;
+      localStorage.removeItem(LS_ACTIVE_AUTOPWN);
+      _jbStopping = false;
+      document.getElementById('jb-running').style.display='none';
+      const liveEl = document.getElementById('jb-live-results');
+      if (liveEl) liveEl.innerHTML = '<p style="color:var(--red);padding:12px">AutoPwn polling timed out — scan may still be running on the server.</p>';
+      toast('AutoPwn polling timed out after 20 minutes', 'error');
+      return;
+    }
+    if (_jbStopping) {
+      stoppingPolls++;
+      if (stoppingPolls >= STOPPING_LIMIT) {
+        clearInterval(timer);
+        activeAutoPwnId = null;
+        localStorage.removeItem(LS_ACTIVE_AUTOPWN);
+        _jbStopping = false;
+        document.getElementById('jb-running').style.display='none';
+        document.getElementById('jb-view-btn').style.display='none';
+        const liveEl = document.getElementById('jb-live-results');
+        if (liveEl) liveEl.innerHTML = '<p style="color:var(--yellow);padding:12px">AutoPwn stop requested — backend may still be winding down.</p>';
+        toast('AutoPwn stop confirmed (UI closed)', 'info');
+        return;
+      }
+    }
     try {
       const r = await GET(`/api/scan/${scanId}`);
       _jbLastData = r;
-      const pct = r.progress || 0;
-      document.getElementById('jb-progress-bar').style.width = pct+'%';
-      const errSummary = r.errors && r.errors.length
-        ? ` ⚠ ${r.errors[0].substring(0,80)}`
-        : '';
-      document.getElementById('jb-progress-text').textContent =
-        `${r.status} — ${pct}% (${r.total_probes||0} probes, ${r.bypasses||0} bypasses found)${errSummary}`;
-      if (r.errors && r.errors.length) {
-        document.getElementById('jb-progress-text').style.color = 'var(--red, #f87171)';
+      if (!_jbStopping) {
+        const pct = r.progress || 0;
+        document.getElementById('jb-progress-bar').style.width = pct+'%';
+        const errSummary = r.errors && r.errors.length ? ` ⚠ ${r.errors[0].substring(0,80)}` : '';
+        document.getElementById('jb-progress-text').textContent =
+          `${r.status} — ${pct}% (${r.total_probes||0} probes, ${r.bypasses||0} bypasses found)${errSummary}`;
+        if (r.errors && r.errors.length)
+          document.getElementById('jb-progress-text').style.color = 'var(--red, #f87171)';
       }
       // Show View Results button as soon as we have probe data
       const hasData = r.total_probes > 0 && r.results && Object.keys(r.results).length > 0;
-      document.getElementById('jb-view-btn').style.display = hasData ? '' : 'none';
+      if (!_jbStopping) document.getElementById('jb-view-btn').style.display = hasData ? '' : 'none';
       // Re-render live partial results if probe count changed
-      if (hasData && r.total_probes !== lastRenderedProbes) {
+      if (!_jbStopping && hasData && r.total_probes !== lastRenderedProbes) {
         lastRenderedProbes = r.total_probes;
+        stuckPolls = 0;
         renderScanResults(r, document.getElementById('jb-live-results'));
+      } else if (!_jbStopping && hasData) {
+        stuckPolls++;
+        if (stuckPolls === STUCK_LIMIT) {
+          const statusEl = document.getElementById('jb-progress-text');
+          if (statusEl) statusEl.textContent += ' ⚠ no new probes — scan may be stuck on a slow model';
+        }
       }
       if (r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled') {
         clearInterval(timer);
         activeAutoPwnId = null;
         localStorage.removeItem(LS_ACTIVE_AUTOPWN);
+        _jbStopping    = false;
+        stoppingPolls  = 0;
+        stuckPolls     = 0;
         document.getElementById('jb-running').style.display='none';
         document.getElementById('jb-view-btn').style.display='none';
         if (r.status !== 'cancelled') {
@@ -2526,6 +2610,8 @@ function pollJailbreakScan(scanId) {
 }
 
 let _scanLastData = null;
+let _scanStopping = false;
+let _jbStopping   = false;
 
 function scanForceViewResults() {
   if (!_scanLastData) return;
@@ -2533,23 +2619,72 @@ function scanForceViewResults() {
 }
 
 function pollScan(scanId, inline=false) {
+  if (inline) {
+    const c = document.getElementById('scan-live-results');
+    if (c) delete c.dataset.liveRendered;
+    for (const k of [..._cardState.keys()]) { if (k.startsWith('scan-live-results|')) _cardState.delete(k); }
+  }
   let attempts = 0;
   let lastRenderedProbes = -1;
-  const max = 600;
+  let stuckPolls = 0;         // polls with no probe count change
+  let stoppingPolls = 0;      // polls after stop was requested
+  const max = 600;            // 20 min absolute poll cap
+  const STUCK_LIMIT   = 60;   // 2 min no progress → warn
+  const STOPPING_LIMIT = 40;  // 80s after stop → force-close UI
   const timer = setInterval(async ()=>{
     attempts++;
-    if (attempts > max) { clearInterval(timer); return; }
+    if (attempts > max) {
+      clearInterval(timer);
+      delete scanPollTimers[scanId];
+      if (scanId === activeScanId) activeScanId = null;
+      localStorage.removeItem(LS_ACTIVE_SCAN);
+      _scanStopping = false;
+      if (inline) {
+        document.getElementById('scan-running').style.display='none';
+        document.getElementById('scan-view-btn').style.display='none';
+        const liveEl = document.getElementById('scan-live-results');
+        if (liveEl) liveEl.innerHTML = '<p style="color:var(--red);padding:12px">Scan polling timed out — the scan may still be running on the server. Check the Reports tab.</p>';
+      }
+      toast('Scan polling timed out after 20 minutes', 'error');
+      return;
+    }
+    // Force-close UI if stop was requested but backend hasn't confirmed cancelled
+    if (_scanStopping) {
+      stoppingPolls++;
+      if (stoppingPolls >= STOPPING_LIMIT) {
+        clearInterval(timer);
+        delete scanPollTimers[scanId];
+        if (scanId === activeScanId) activeScanId = null;
+        localStorage.removeItem(LS_ACTIVE_SCAN);
+        _scanStopping = false;
+        if (inline) {
+          document.getElementById('scan-running').style.display='none';
+          document.getElementById('scan-view-btn').style.display='none';
+          const liveEl = document.getElementById('scan-live-results');
+          if (liveEl) liveEl.innerHTML = '<p style="color:var(--yellow);padding:12px">Scan stop requested — backend may still be finishing in-flight probes. Results will appear in Reports when complete.</p>';
+        }
+        toast('Scan stop confirmed (UI closed — backend may still be winding down)', 'info');
+        return;
+      }
+    }
     try {
       const r = await GET(`/api/scan/${scanId}`);
       _scanLastData = r;
-      if (inline) updateInlineScanStatus(r);
+      if (inline && !_scanStopping) updateInlineScanStatus(r);
       // Show partial results live as probes complete
-      if (inline) {
+      if (inline && !_scanStopping) {
         const hasData = r.total_probes > 0 && r.results && Object.keys(r.results).length > 0;
         document.getElementById('scan-view-btn').style.display = hasData ? '' : 'none';
         if (hasData && r.total_probes !== lastRenderedProbes) {
           lastRenderedProbes = r.total_probes;
+          stuckPolls = 0;
           renderScanResults(r, document.getElementById('scan-live-results'));
+        } else if (hasData) {
+          stuckPolls++;
+          if (stuckPolls === STUCK_LIMIT) {
+            const statusEl = document.getElementById('scan-progress-text');
+            if (statusEl) statusEl.textContent = statusEl.textContent + ' ⚠ no new probes — scan may be stuck on a slow model';
+          }
         }
       }
       if (r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled') {
@@ -2557,6 +2692,9 @@ function pollScan(scanId, inline=false) {
         delete scanPollTimers[scanId];
         if (scanId === activeScanId) activeScanId = null;
         localStorage.removeItem(LS_ACTIVE_SCAN);
+        _scanStopping  = false;
+        stoppingPolls  = 0;
+        stuckPolls     = 0;
         if (r.status === 'completed') cacheScanResult(r);
         if (inline) {
           document.getElementById('scan-running').style.display='none';
@@ -2604,11 +2742,12 @@ function renderScanResults(r, container, autoExpand=false) {
     (vl || []).map(vr => ({...vr, model}))
   );
   if (!mvList.length) { container.innerHTML = '<p class="empty">No results yet</p>'; return; }
-  // Auto-expand during live scans
   const liveIds = ['jb-live-results', 'scan-live-results'];
-  if (liveIds.includes(container.id) && r.status === 'running') autoExpand = true;
+  const isLive = liveIds.includes(container.id) && r.status === 'running';
+  const firstRender = isLive && !container.dataset.liveRendered;
   const bypassRate = r.total_probes ? ((r.bypasses||0)/r.total_probes*100).toFixed(0) : 0;
   const containerId = 'rc-' + Math.random().toString(36).slice(2,8);
+  const _scrollY = window.scrollY;
   container.innerHTML = `
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
@@ -2631,8 +2770,8 @@ function renderScanResults(r, container, autoExpand=false) {
         <div class="stat-box"><div class="num">${r.errors?.length||0}</div><div class="lbl">Errors</div></div>
       </div>
       ${mvList.map(mv=>`
-        <div class="result-card ${autoExpand?'open':''}" onclick="toggleResultCard(this)">
-          <div class="result-header">
+        <div class="result-card ${(()=>{const k=(mv.model||'')+'/'+(mv.vulnerability||'');const mk=container.id+'|'+k;return _cardState.has(mk)?_cardState.get(mk):(autoExpand||(firstRender&&mv===mvList[0]))?true:false;})()?'open':''}" data-key="${escHtml((mv.model||'')+'/'+(mv.vulnerability||''))}">
+          <div class="result-header" onclick="toggleResultCard(this.closest('.result-card'))" style="cursor:pointer">
             <span style="font-weight:600">${escHtml(mv.model||'')}</span>
             <span class="text-muted">/</span>
             <span class="badge badge-blue">${escHtml(mv.vulnerability||'')}</span>
@@ -2649,17 +2788,28 @@ function renderScanResults(r, container, autoExpand=false) {
               <div class="probe-row">
                 <span class="badge ${p.bypassed?'badge-red':p.error?'badge-orange':'badge-green'}" style="flex-shrink:0">${p.bypassed?'BYPASS':p.error?'ERROR':'SAFE'}</span>
                 <div style="flex:1;min-width:0">
-                  ${hasWrap?`
-                    <div style="font-size:10px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:.04em">Full prompt sent · <span class="badge badge-purple" style="font-size:9px;vertical-align:middle">${escHtml(p.override_mode)}</span>${p.mutation?` · <em style="text-transform:none">${escHtml(p.mutation)}</em>`:''}</div>
-                    <div style="font-size:11px;color:var(--text);margin-bottom:6px;word-break:break-all;white-space:pre-wrap;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:6px 8px">${escHtml(wrappedText)}</div>
-                    <details style="margin-bottom:4px">
-                      <summary style="font-size:10px;color:var(--muted);cursor:pointer;user-select:none">Original prompt (before wrapping)</summary>
-                      <div style="font-size:11px;color:var(--muted);margin-top:4px;word-break:break-all;white-space:pre-wrap;padding-left:8px">${escHtml(p.prompt||'')}</div>
-                    </details>`
-                  :`
-                    <div style="font-size:10px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:.04em">Prompt${hasOverride?` · <span class="badge badge-purple" style="font-size:9px;vertical-align:middle">${escHtml(p.override_mode)}</span>`:''}${p.mutation?` · <em style="text-transform:none">${escHtml(p.mutation)}</em>`:''}</div>
-                    <div style="font-size:11px;color:var(--text);margin-bottom:4px;word-break:break-all;white-space:pre-wrap">${escHtml(p.prompt||'')}</div>
-                    ${hasOverride?`<div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:4px">${escHtml(p.override_mode)} override applied (full prompt not stored — re-run to capture)</div>`:''}`}
+                  ${(()=>{
+                    const overrideMeta = hasOverride ? allOverrides.find(o=>o.mode===p.override_mode) : null;
+                    const sysPrompt = overrideMeta?.system_prompt || '';
+                    const sysBlock = sysPrompt ? `
+                      <details style="margin-bottom:6px">
+                        <summary style="font-size:10px;color:var(--purple);cursor:pointer;user-select:none">&#9656; System prompt (${escHtml(p.override_mode)} mode)</summary>
+                        <div style="font-size:10px;color:var(--muted);margin-top:4px;word-break:break-all;white-space:pre-wrap;padding:6px 8px;background:var(--bg2);border-left:2px solid var(--purple);border-radius:0 4px 4px 0">${escHtml(sysPrompt)}</div>
+                      </details>` : '';
+                    if (hasWrap) return `
+                      <div style="font-size:10px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:.04em">User message sent · <span class="badge badge-purple" style="font-size:9px;vertical-align:middle">${escHtml(p.override_mode)}</span>${p.mutation?` · <em style="text-transform:none">${escHtml(p.mutation)}</em>`:''}</div>
+                      ${sysBlock}
+                      <div style="font-size:11px;color:var(--text);margin-bottom:6px;word-break:break-all;white-space:pre-wrap;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:6px 8px">${escHtml(wrappedText)}</div>
+                      <details style="margin-bottom:4px">
+                        <summary style="font-size:10px;color:var(--muted);cursor:pointer;user-select:none">Original prompt (before wrapping)</summary>
+                        <div style="font-size:11px;color:var(--muted);margin-top:4px;word-break:break-all;white-space:pre-wrap;padding-left:8px">${escHtml(p.prompt||'')}</div>
+                      </details>`;
+                    return `
+                      <div style="font-size:10px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:.04em">Prompt${hasOverride?` · <span class="badge badge-purple" style="font-size:9px;vertical-align:middle">${escHtml(p.override_mode)}</span>`:''}${p.mutation?` · <em style="text-transform:none">${escHtml(p.mutation)}</em>`:''}</div>
+                      ${sysBlock}
+                      <div style="font-size:11px;color:var(--text);margin-bottom:4px;word-break:break-all;white-space:pre-wrap">${escHtml(p.prompt||'')}</div>
+                      ${hasOverride&&!sysPrompt?`<div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:4px">${escHtml(p.override_mode)} override applied (full prompt not stored — re-run to capture)</div>`:''}`;
+                  })()}
                   ${p.response?`<div style="font-size:12px;background:var(--bg3);padding:6px 8px;border-radius:4px;margin-top:4px;word-break:break-all;white-space:pre-wrap">${escHtml(p.response||'')}</div>`:''}
                   ${p.error?`<div style="font-size:11px;color:var(--red);margin-top:3px">${escHtml(p.error)}</div>`:''}
                 </div>
@@ -2673,10 +2823,17 @@ function renderScanResults(r, container, autoExpand=false) {
         </div>`).join('')}
       </div>
     </div>`;
+  if (isLive) {
+    window.scrollTo(0, _scrollY);
+    container.dataset.liveRendered = '1';
+  }
 }
 
 function toggleResultCard(el) {
   el.classList.toggle('open');
+  const containerId = el.closest('[id]')?.id || '';
+  const key = el.dataset.key || '';
+  if (containerId && key) _cardState.set(containerId + '|' + key, el.classList.contains('open'));
 }
 
 function toggleEl(evt, id, btn, labelHide, labelShow) {
@@ -4459,7 +4616,7 @@ async function init() {
     toast(`Reconnected to AutoPwn ${id.substring(0,8)}…`, 'info');
   }
 
-  if (resumeAutoPwn) {
+  if (resumeAutoPwn && !isScanStopped(resumeAutoPwn)) {
     try {
       const r = await GET(`/api/scan/${resumeAutoPwn}`);
       if (r.status === 'running' || r.status === 'pending') {
@@ -4468,17 +4625,8 @@ async function init() {
         localStorage.removeItem(LS_ACTIVE_AUTOPWN);
       }
     } catch(e) { localStorage.removeItem(LS_ACTIVE_AUTOPWN); }
-  } else if (sessionScans.length) {
-    // Fallback: check the last 3 scans in history for a running one
-    for (const id of sessionScans.slice(-3).reverse()) {
-      try {
-        const r = await GET(`/api/scan/${id}`);
-        if (r.status === 'running' || r.status === 'pending') {
-          _attachAutoPwn(id, r);
-          break;
-        }
-      } catch(e) { /* skip */ }
-    }
+  } else {
+    if (resumeAutoPwn) localStorage.removeItem(LS_ACTIVE_AUTOPWN);
   }
 
   if (resumeScan) {
