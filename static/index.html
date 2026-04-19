@@ -1136,7 +1136,7 @@ BIGMODEL_API_KEY=...</pre>
       <div class="tab-pane active" id="tab-disc-insights">
         <div class="card" style="margin-bottom:12px">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <button class="btn-sm" onclick="loadDiscInsights()">&#8635; Refresh</button>
+            <button class="btn-sm" onclick="_discAutoLoad('disc-insights',true)">&#8635; Refresh</button>
             <button class="btn-sm btn-ghost" onclick="synthesizeMethods()">&#10010; Synthesize Novel Methods</button>
             <span id="disc-insights-status" style="font-size:12px;color:var(--muted)"></span>
           </div>
@@ -1153,7 +1153,7 @@ BIGMODEL_API_KEY=...</pre>
               <label>Min bypasses</label>
               <input type="number" id="disc-sig-min" value="1" min="0" style="width:80px"/>
             </div>
-            <button class="btn-sm" style="margin-top:18px" onclick="loadDiscSignatures()">&#8635; Load</button>
+            <button class="btn-sm" style="margin-top:18px" onclick="_discAutoLoad('disc-signatures',true)">&#8635; Refresh</button>
           </div>
         </div>
         <div id="disc-sigs-out"></div>
@@ -1178,7 +1178,7 @@ BIGMODEL_API_KEY=...</pre>
                 <option value="2">2 (partial)</option>
               </select>
             </div>
-            <button class="btn-sm" style="margin-top:18px" onclick="loadDiscWarmPool()">&#8635; Load</button>
+            <button class="btn-sm" style="margin-top:18px" onclick="_discAutoLoad('disc-warmpool',true)">&#8635; Refresh</button>
             <button class="btn-sm btn-ghost" style="margin-top:18px" onclick="refineWarmPool()">&#9998; LLM Refine…</button>
           </div>
         </div>
@@ -1217,7 +1217,7 @@ BIGMODEL_API_KEY=...</pre>
               <label>Model filter</label>
               <input type="text" id="disc-def-model" placeholder="leave blank for all"/>
             </div>
-            <button class="btn-sm" style="margin-top:18px" onclick="loadDiscDefenseMap()">&#8635; Load</button>
+            <button class="btn-sm" style="margin-top:18px" onclick="_discAutoLoad('disc-defense',true)">&#8635; Refresh</button>
           </div>
         </div>
         <div id="disc-def-out"></div>
@@ -1231,7 +1231,7 @@ BIGMODEL_API_KEY=...</pre>
               <label>Min score</label>
               <input type="number" id="disc-xfer-min" value="0.3" min="0" max="1" step="0.05" style="width:80px"/>
             </div>
-            <button class="btn-sm" style="margin-top:18px" onclick="loadDiscTransfer()">&#8635; Load</button>
+            <button class="btn-sm" style="margin-top:18px" onclick="_discAutoLoad('disc-transfer',true)">&#8635; Refresh</button>
           </div>
         </div>
         <div id="disc-xfer-out"></div>
@@ -1245,7 +1245,7 @@ BIGMODEL_API_KEY=...</pre>
               <label>Model filter</label>
               <input type="text" id="disc-delta-model" placeholder="leave blank for all"/>
             </div>
-            <button class="btn-sm" style="margin-top:18px" onclick="loadDiscDelta()">&#8635; Load</button>
+            <button class="btn-sm" style="margin-top:18px" onclick="_discAutoLoad('disc-delta',true)">&#8635; Refresh</button>
           </div>
         </div>
         <div id="disc-delta-out"></div>
@@ -1255,7 +1255,7 @@ BIGMODEL_API_KEY=...</pre>
       <div class="tab-pane" id="tab-disc-stats">
         <div class="card" style="margin-bottom:12px">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <button class="btn-sm" onclick="loadDiscStats()">&#8635; Load Stats</button>
+            <button class="btn-sm" onclick="_discAutoLoad('disc-stats',true)">&#8635; Refresh Stats</button>
             <button class="btn-sm btn-ghost" style="color:var(--red)" onclick="resetDiscovery()">&#128465; Reset Failure Store</button>
           </div>
         </div>
@@ -1266,7 +1266,7 @@ BIGMODEL_API_KEY=...</pre>
       <div class="tab-pane" id="tab-disc-templates">
         <div class="card" style="margin-bottom:12px">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <button class="btn-sm" onclick="loadDiscTemplates()">&#8635; Refresh</button>
+            <button class="btn-sm" onclick="_discAutoLoad('disc-templates',true)">&#8635; Refresh</button>
             <span style="font-size:12px;color:var(--muted)">Templates auto-generated from chain bypass analysis. Save from the Chain Builder → Analyze panel.</span>
           </div>
         </div>
@@ -1434,7 +1434,7 @@ document.querySelectorAll('#sidebar nav a').forEach(a => {
     const _cnt = document.getElementById('content'); if(_cnt) _cnt.scrollTop = 0;
     document.getElementById('page-title').textContent = SECTION_TITLES[s]||s;
     document.getElementById('page-sub').textContent = '';
-    if (s === 'discovery') loadDiscInsights();
+    if (s === 'discovery') _discAutoLoad('disc-insights');
     if (s === 'scan') renderAutoPwnHistory();
     if (s === 'models') loadModels();
     if (s === 'providers') { loadProviders(); loadOllamaUrl(); }
@@ -1450,6 +1450,7 @@ document.querySelectorAll('.tabs .tab').forEach(tab => {
     tab.classList.add('active');
     document.getElementById('tab-'+pane)?.classList.add('active');
     if (pane === 'scan-jailbreak') renderAutoPwnHistory();
+    if (DISC_TAB_MAP[pane]) _discAutoLoad(pane);
   });
 });
 
@@ -3941,6 +3942,61 @@ async function testProviderLive() {
 
 // ─── Discovery ────────────────────────────────────────────────────────────────
 
+// ─── Discovery cache (localStorage + auto-load) ───────────────────────────────
+const _DISC_TTL  = 90_000;  // 90 s before a stale re-fetch
+const _DISC_LOADING = new Set(); // prevent concurrent duplicate fetches
+
+function _discKey(panel)    { return `vexor_disc_${panel}`; }
+function _discCacheGet(panel) {
+  try {
+    const raw = localStorage.getItem(_discKey(panel));
+    if (!raw) return null;
+    const { ts, data } = JSON.parse(raw);
+    return (Date.now() - ts < _DISC_TTL) ? data : null;
+  } catch { return null; }
+}
+function _discCacheSet(panel, data) {
+  try { localStorage.setItem(_discKey(panel), JSON.stringify({ ts: Date.now(), data })); } catch {}
+}
+function _discCacheClear(panel) {
+  try { localStorage.removeItem(_discKey(panel)); } catch {}
+}
+
+// Map tab id → { loader fn, output element id }
+const DISC_TAB_MAP = {
+  'disc-insights':   { fn: () => loadDiscInsights(),   out: 'disc-insights-out' },
+  'disc-signatures': { fn: () => loadDiscSignatures(), out: 'disc-sigs-out' },
+  'disc-warmpool':   { fn: () => loadDiscWarmPool(),   out: 'disc-wp-out' },
+  'disc-defense':    { fn: () => loadDiscDefenseMap(), out: 'disc-def-out' },
+  'disc-transfer':   { fn: () => loadDiscTransfer(),   out: 'disc-xfer-out' },
+  'disc-delta':      { fn: () => loadDiscDelta(),      out: 'disc-delta-out' },
+  'disc-stats':      { fn: () => loadDiscStats(),      out: 'disc-stats-out' },
+  'disc-templates':  { fn: () => loadDiscTemplates(),  out: 'disc-templates-out' },
+};
+
+// Called by section nav when discovery is opened, and by tab clicks.
+// force=true bypasses cache (used by Refresh buttons and post-delete reloads).
+function _discAutoLoad(panel, force = false) {
+  const cfg = DISC_TAB_MAP[panel];
+  if (!cfg) return;
+  if (!force) {
+    const cached = _discCacheGet(panel);
+    if (cached && cached.html) {
+      const el = document.getElementById(cfg.out);
+      if (el) { el.innerHTML = cached.html; return; }
+    }
+  }
+  if (_DISC_LOADING.has(panel)) return;
+  _DISC_LOADING.add(panel);
+  Promise.resolve(cfg.fn()).then(() => {
+    const el = document.getElementById(cfg.out);
+    // Save rendered HTML to cache (skip if still showing loading state)
+    if (el && el.innerHTML && !el.innerHTML.includes('Loading…')) {
+      _discCacheSet(panel, { html: el.innerHTML });
+    }
+  }).finally(() => _DISC_LOADING.delete(panel));
+}
+
 async function loadDiscInsights() {
   const el = document.getElementById('disc-insights-out');
   const st = document.getElementById('disc-insights-status');
@@ -4071,7 +4127,7 @@ async function deleteSig(sigId) {
   try {
     await DEL(`/api/discovery/signatures/${encodeURIComponent(sigId)}`);
     toast('Signature removed', 'success');
-    loadDiscSignatures();
+    _discAutoLoad('disc-signatures', true);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -4128,7 +4184,7 @@ async function deleteWarmEntry(probeId) {
   try {
     await DEL(`/api/discovery/warm-pool/${encodeURIComponent(probeId)}`);
     toast('Entry removed', 'success');
-    loadDiscWarmPool();
+    _discAutoLoad('disc-warmpool', true);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -4136,7 +4192,7 @@ async function dedupWarmPool() {
   try {
     const d = await POST('/api/discovery/dedup', {});
     toast(d.message, 'success');
-    loadDiscWarmPool();
+    _discAutoLoad('disc-warmpool', true);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -4145,7 +4201,7 @@ async function cleanWarmPool() {
   try {
     const d = await POST('/api/discovery/clean', {});
     toast(d.message, 'success');
-    loadDiscWarmPool();
+    _discAutoLoad('disc-warmpool', true);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -4337,7 +4393,7 @@ async function deleteUserTemplate(id) {
   try {
     await DEL(`/api/chain/templates/${encodeURIComponent(id)}`);
     toast('Template deleted', 'success');
-    loadDiscTemplates();
+    _discAutoLoad('disc-templates', true);
     loadChainGoals();
   } catch(e) { toast(e.message, 'error'); }
 }
