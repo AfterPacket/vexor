@@ -1,10 +1,25 @@
-# Vexor v2.2
+# Vexor v2.4
 
 **Offensive LLM security testing platform — OWASP GenAI Top 10**
 
 Tests LLMs for prompt injection, system-prompt leakage, excessive agency, sensitive-info extraction, and all 10 OWASP GenAI vulnerability classes. Ships with a full web UI, concurrent async scanning across 15+ providers (including Ollama Cloud), an automated jailbreak sweep engine, 38 override/persona modes including cognitive attack patterns and reasoning-model-specific personas, 19 mutation techniques including Parseltongue/substitution obfuscation, a dedicated Chinese-language attack module, PromptFoo import pipeline, and synthetic attack data generation with a closed-loop self-learning pipeline.
 
 > For authorized security testing, red team engagements, and academic research only.
+
+---
+
+## What's New in v2.4
+
+| Area | Change |
+|---|---|
+| **GLM-5:cloud** | `glm-5:cloud` (355B FP8, ~67s avg latency) now supported via local Ollama cloud proxy. Appears as `ollama/glm-5:cloud` in model checklist alongside `ollama/glm-4.6:cloud`. |
+| **Ollama timeout** | Raised Ollama sync + async timeouts from 120 s → 240 s. Fixes connection failures on slow cloud-proxied models (GLM-5, Qwen3, MiniMax). |
+| **Scan: + AutoPwn sweep** | New checkbox in scan form. When enabled, any probe that doesn't bypass during the regular phase is re-run through the full model-specific AutoPwn suite (all 37 modes, stops on first bypass). Records winning mode per probe. |
+| **Scan: best prompts** | "Best prompts (warm pool)" checkbox now explicitly visible. Previously always-on silently. Prepends previously successful prompts (warm pool, transfer matrix, synthesized templates) for each model+vuln pair. |
+| **Multi-mode scan** | New "Multi-mode" toggle below Override Mode. When active, each prompt is cross-producted with every checked mode — e.g. 10 prompts × 15 modes = 150 probes per vuln. All/None buttons for fast selection. |
+| **Prompts per vulnerability** | Hard cap raised from 10 → 50. Slider max raised to 50. |
+| **Token cost estimate** | Scan form now shows per-model estimated USD spend before launch, based on current probe count × average token estimate (~500 input / ~350 output per probe). Covers all paid providers: OpenAI, Anthropic, Google, xAI, Zhipu AI. Free/local models show no cost. |
+| **Scan estimate display** | Estimate now bold with full breakdown: models × vulns × prompts (mutations) × modes + AutoPwn sweep + chain prompts, plus inline cost per model. |
 
 ---
 

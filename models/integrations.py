@@ -547,7 +547,7 @@ class OllamaIntegration(ModelIntegrator):
             resp = self._session.post(
                 f"{self.base_url}/api/chat",
                 json={"model": clean, "messages": msgs, "stream": False},
-                timeout=120,
+                timeout=240,
             )
             resp.raise_for_status()
             return resp.json()["message"]["content"].strip()
@@ -576,7 +576,7 @@ class OllamaIntegration(ModelIntegrator):
                 async with s.post(
                     f"{self.base_url}/api/chat",
                     json={"model": clean, "messages": msgs, "stream": False},
-                    timeout=aiohttp.ClientTimeout(total=120),
+                    timeout=aiohttp.ClientTimeout(total=240),
                 ) as r:
                     r.raise_for_status()
                     data = await r.json()

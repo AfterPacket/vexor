@@ -14,10 +14,22 @@ class ScanRequest(BaseModel):
         default="none",
         description="Jailbreak/override persona (none, dan, godmode, claude_bypass, …)",
     )
+    override_modes: Optional[List[str]] = Field(
+        default=None,
+        description="When set, each prompt is tested against every mode in this list (cross-product). Overrides override_mode.",
+    )
     prompt_count: int = Field(default=5, ge=1, le=50)
     use_mutations: bool = Field(
         default=False,
         description="Also send mutated variants of each base prompt",
+    )
+    include_autopwn: bool = Field(
+        default=False,
+        description="After regular probes, sweep non-bypassed prompts through full autopwn suite",
+    )
+    use_warm_pool: bool = Field(
+        default=True,
+        description="Prepend previously successful (warm pool) prompts for this model+vuln pair",
     )
 
 

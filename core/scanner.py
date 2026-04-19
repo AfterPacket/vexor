@@ -196,6 +196,10 @@ class ScanJob:
     active_tasks:         set = field(default_factory=set)  # in-flight asyncio tasks
     # Per-vulnerability extra prompts from chain templates — keyed by vuln id
     extra_prompts:        Dict[str, List[str]] = field(default_factory=dict)
+    # When set, each prompt is cross-producted with every mode in this list
+    override_modes:       Optional[List[str]] = None
+    # After regular probes, sweep non-bypassed prompts through full autopwn suite
+    include_autopwn:      bool = False
 
     @property
     def elapsed_seconds(self) -> Optional[float]:
@@ -283,12 +287,15 @@ class Scanner:
 
     def create_scan_job(
         self,
-        models:          List[str],
-        vulnerabilities: Optional[List[str]] = None,
-        override_mode:   str = "none",
-        prompt_count:    int = 10,
-        use_mutations:   bool = False,
-        extra_prompts:   Optional[Dict[str, List[str]]] = None,
+        models:           List[str],
+        vulnerabilities:  Optional[List[str]] = None,
+        override_mode:    str = "none",
+        override_modes:   Optional[List[str]] = None,
+        prompt_count:     int = 10,
+        use_mutations:    bool = False,
+        extra_prompts:    Optional[Dict[str, List[str]]] = None,
+        include_autopwn:  bool = False,
+        use_warm_pool:    bool = True,
     ) -> ScanJob:
         return ScanJob(
             scan_id         = str(uuid.uuid4()),
@@ -296,9 +303,12 @@ class Scanner:
             models          = models,
             vulnerabilities = vulnerabilities or ALL_VULNS,
             override_mode   = override_mode,
+            override_modes  = override_modes or None,
             prompt_count    = prompt_count,
             use_mutations   = use_mutations,
             extra_prompts   = extra_prompts or {},
+            include_autopwn = include_autopwn,
+            use_warm_pool   = use_warm_pool,
         )
 
     async def run_scan(
@@ -330,11 +340,13 @@ class Scanner:
 
         # Estimate total probes for live progress.
         # Base = prompt_count + chain extras per vuln; mutations add ~12 more per vuln (3 base × 4 variants).
+        # Multi-mode multiplies by number of selected modes.
+        _modes_count = len(job.override_modes) if job.override_modes else 1
         def _estimate_per_pair(vuln: str) -> int:
             base = job.prompt_count + len(job.extra_prompts.get(vuln, []))
             if job.use_mutations:
                 base += min(3, base) * 4
-            return base
+            return base * _modes_count
         job.probes_total_hint = sum(_estimate_per_pair(v) for _ in job.models for v in job.vulnerabilities)
 
         # Lazy import to avoid circular dependency at module load time
@@ -593,10 +605,18 @@ class Scanner:
 
         # Use as_completed so progress updates as each probe finishes,
         # not all at once after the last one in the batch lands.
-        tasks = [
-            asyncio.ensure_future(_probe(p, _mode_for_prompt(i)))
-            for i, p in enumerate(prompts)
-        ]
+        # Multi-mode: cross-product each prompt × each selected mode.
+        if job.override_modes:
+            tasks = [
+                asyncio.ensure_future(_probe(p, mode))
+                for p in prompts
+                for mode in job.override_modes
+            ]
+        else:
+            tasks = [
+                asyncio.ensure_future(_probe(p, _mode_for_prompt(i)))
+                for i, p in enumerate(prompts)
+            ]
 
         # Synthesized template probes — apply learned attack templates to the
         # first 2 base prompts. Cap at 3 templates per pair to avoid runaway growth.
@@ -666,6 +686,41 @@ class Scanner:
 
         if fatal_err:
             raise RuntimeError(fatal_err)
+
+        # AutoPwn sweep — re-probe non-bypassed prompts through full model suite
+        # (all modes, stops on first bypass per prompt).
+        if job.include_autopwn and not job.cancelled and not (job_abort and job_abort.is_set()):
+            _ap_suite = self._autopwn_suite(model)
+            provider  = _provider_for_model(model)
+            rl        = get_registry()
+            failed_prompts = list({
+                p.prompt for p in result.probes
+                if not p.bypassed and p.prompt and not p.error
+            })
+            for raw_p in failed_prompts:
+                if job.cancelled or (job_abort and job_abort.is_set()):
+                    break
+                for mode in _ap_suite:
+                    if job.cancelled or (job_abort and job_abort.is_set()):
+                        break
+                    await rl.acquire(provider)
+                    try:
+                        ap_probe = await self._send_probe(mm, model, raw_p, vuln, mode)
+                    except RuntimeError as e:
+                        if "Fatal provider error" in str(e):
+                            if job_abort:
+                                job_abort.set()
+                            job.cancelled = True
+                        break
+                    finally:
+                        rl.release(provider)
+                    if on_probe_done:
+                        on_probe_done()
+                    result.probes.append(ap_probe)
+                    result.total_probes += 1
+                    if ap_probe.bypassed:
+                        result.bypass_count += 1
+                        break
 
         return result
 

@@ -249,12 +249,15 @@ async def start_scan(
     store = _get_store(request)
     extra = _extract_chain_prompts(req.vulnerabilities or [])
     job   = _scanner.create_scan_job(
-        models          = req.models,
-        vulnerabilities = req.vulnerabilities,
-        override_mode   = req.override_mode,
-        prompt_count    = req.prompt_count,
-        use_mutations   = req.use_mutations,
-        extra_prompts   = extra,
+        models           = req.models,
+        vulnerabilities  = req.vulnerabilities,
+        override_mode    = req.override_mode,
+        override_modes   = req.override_modes or None,
+        prompt_count     = req.prompt_count,
+        use_mutations    = req.use_mutations,
+        extra_prompts    = extra,
+        include_autopwn  = req.include_autopwn,
+        use_warm_pool    = req.use_warm_pool,
     )
     store[job.scan_id] = job
     background_tasks.add_task(_run_job, job.scan_id, store)

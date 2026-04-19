@@ -183,8 +183,8 @@
     }
   },
   "testing": {
-    "max_prompts_per_vulnerability": 10,
-    "timeout_seconds": 60,
+    "max_prompts_per_vulnerability": 50,
+    "timeout_seconds": 240,
     "retry_on_failure": true,
     "max_retries": 3
   },
