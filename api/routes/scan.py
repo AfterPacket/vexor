@@ -464,6 +464,32 @@ async def start_jailbreak_scan(
 
 # -- Preview (dry-run) --------------------------------------------------------
 
+
+# ── Scan history (persisted + in-memory) ─────────────────────────────────────
+
+@router.get("/history")
+async def list_scan_history(request: Request):
+    """Return all scans: in-memory store + any persisted on disk not yet loaded."""
+    store = _get_store(request)
+    # Load any disk scans not yet in memory
+    load_all_scans_from_disk(store)
+    scans = []
+    for scan_id, job in store.items():
+        d = job.to_dict()
+        scans.append({
+            "scan_id":         scan_id,
+            "status":          d["status"],
+            "models":          d["models"],
+            "vulnerabilities": d["vulnerabilities"],
+            "override_mode":   d["override_mode"],
+            "progress":        d["progress"],
+            "elapsed_seconds": d.get("elapsed_seconds"),
+            "total_probes":    d.get("total_probes", 0),
+            "bypasses":        d.get("bypasses", 0),
+        })
+    scans.sort(key=lambda s: s.get("elapsed_seconds") or 0, reverse=True)
+    return {"scans": scans, "total": len(scans)}
+
 @router.post("/preview")
 async def preview_scan(req: ScanRequest):
     """Return the prompts that would be sent without calling any LLM."""

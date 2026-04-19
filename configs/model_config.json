@@ -25,7 +25,7 @@
   "xai_api_key": "",
   "bigmodel_api_key": "",
   "delay_between_requests": 1.0,
-  "ollama_base_url": "http://localhost:11434",
+  "ollama_base_url": "http://127.0.0.1:11434",
   "api_endpoints": {},
   "api_keys": {},
   "default_headers": {

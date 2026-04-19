@@ -47,15 +47,30 @@ class PromptEngine:
     def _load_exploits(self):
         if os.path.exists(self.exploits_path):
             try:
+                self._exploits_mtime = os.path.getmtime(self.exploits_path)
                 with open(self.exploits_path, encoding="utf-8") as f:
                     self._exploits = json.load(f)
             except Exception:
                 self._exploits = {}
+                self._exploits_mtime = 0
         else:
             self._exploits = {}
+            self._exploits_mtime = 0
 
     def reload_exploits(self):
         self._load_exploits()
+
+    def _maybe_reload_exploits(self):
+        """Hot-reload effective_prompts.json if it has changed on disk since last load.
+        Called before every get_prompts() so imported bypasses take effect immediately
+        without a server restart."""
+        try:
+            if os.path.exists(self.exploits_path):
+                mtime = os.path.getmtime(self.exploits_path)
+                if mtime > getattr(self, "_exploits_mtime", 0):
+                    self._load_exploits()
+        except Exception:
+            pass
 
     # ── Module loading ────────────────────────────────────────────────────────
 
@@ -103,6 +118,7 @@ class PromptEngine:
         Return up to `count` attack prompts for a vulnerability.
         Effective prompts for the given model are prepended (higher priority).
         """
+        self._maybe_reload_exploits()  # hot-reload if effective_prompts.json changed
         key = vulnerability.lower()
         prompts: List[str] = []
 

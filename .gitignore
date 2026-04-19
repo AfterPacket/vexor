@@ -81,4 +81,5 @@ data/
 .claude/
 
 # ── Backup / artifact files ──────────────────────────────────────────────────
-*# Name clash*
+gronk
+*.bak

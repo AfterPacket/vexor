@@ -417,6 +417,40 @@ async def remove_custom_provider(model_id: str):
     return {"status": "removed", "model_id": model_id}
 
 
+# ── Ollama configuration ────────────────────────────────────────────────────────
+
+class OllamaConfigRequest(BaseModel):
+    ollama_base_url: str
+
+
+@router.get("/config/ollama")
+async def get_ollama_config():
+    """Return the current Ollama base URL from model_config.json."""
+    cfg = _load_config_file()
+    return {"ollama_base_url": cfg.get("ollama_base_url", "http://127.0.0.1:11434/v1")}
+
+
+@router.patch("/config/ollama")
+async def update_ollama_config(req: OllamaConfigRequest):
+    """Update Ollama base URL in model_config.json and reload the ModelManager."""
+    if not req.ollama_base_url:
+        raise HTTPException(status_code=400, detail="ollama_base_url is required")
+    cfg = _load_config_file()
+    cfg["ollama_base_url"] = req.ollama_base_url
+    _save_config_file(cfg)
+    _reload_mm()
+    # Return the live model list for the UI to refresh
+    mm = _get_mm()
+    ollama_intg = getattr(mm, "integrations", {}).get("ollama")
+    models = []
+    if ollama_intg and hasattr(ollama_intg, "get_available_models"):
+        try:
+            models = ollama_intg.get_available_models()
+        except Exception:
+            pass
+    return {"status": "updated", "ollama_base_url": req.ollama_base_url, "models": models}
+
+
 @router.get("/{model_id:path}", response_model=ModelTestResponse)
 async def probe_model(model_id: str):
     """Quick connectivity check — sends 'ping' and returns result."""

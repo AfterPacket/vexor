@@ -1,4 +1,4 @@
-# Vexor v2.1
+# Vexor v2.2
 
 **Offensive LLM security testing platform — OWASP GenAI Top 10**
 
@@ -7,6 +7,37 @@ Tests LLMs for prompt injection, system-prompt leakage, excessive agency, sensit
 > For authorized security testing, red team engagements, and academic research only.
 
 ---
+
+## What's New in v2.3 (Stability + Persistence patch)
+
+| Area | Change |
+|---|---|
+| **Scan persistence** | Completed/failed/cancelled scans now saved to `data/scans/{id}.json` with full probe data (prompts, responses, bypass status, latency). Loaded back into memory on every startup — scans survive server restarts. |
+| **Server scan history** | New `GET /api/scan/history` endpoint returns all persisted + in-memory scans. "Browse Server History" in the UI now works and renders clickable cards with View / JSON / CSV export per scan. |
+| **Scan export** | `GET /api/scan/{id}/export?fmt=json|csv` endpoint for direct server-side download of full scan data including all prompts and responses. Falls back to localStorage cache if not on server. |
+| **Missing endpoints fixed** | Added `GET /api/scan/history`. Fixed 404 on every "Browse Server History" click. |
+| **PATCH HTTP helper** | Added `const PATCH = (p,b) => api('PATCH', p, b)` to the JS API layer — was missing, silently breaking Ollama URL save. |
+| **Ollama URL config** | Moved out of Models top bar into a dedicated card in the Providers section. `saveOllamaUrl()` and `loadOllamaUrl()` functions restored. Auto-loads when navigating to Providers. |
+| **Ollama model name bug** | Fixed `Error: model 'ollama' not found` — provider Test button was passing the slug `\ollama\` as the model ID. `quickProvTest()` now resolves slugs to real model IDs from the live `allModels` list. |
+| **Provider cards clickable** | Clicking anywhere on a loaded provider card triggers `quickProvTest`. Non-loaded cards show a helper message. `data-prov` attribute drives the onclick — no nested template literal escaping issues. |
+| **Section bleed-through** | Models table was showing on every page. Fixed: section switcher now sets explicit `style.display` in addition to classList toggling, and resets `#content.scrollTop = 0` on every nav click. |
+| **Startup speed** | `run_toolkit.bat` now hash-gates `pip install` — only re-runs when `requirements.txt` changes (MD5 stored in `venv/.req_hash`). Eliminates 20–60 s startup wait. |
+| **Refusal signal coverage** | 88 → 117 `_GLOBAL_REFUSAL_SIGNALS`. Added: `fulfill`, `reveal`, `share`, `disclose`, `can't help with this` patterns — fixes false-positive BYPASSED on GLM-5 responses that actually refused. |
+| **Chain godmode template** | `glm5_godmode_escalation` step 4 rewritten: `[TARGET REQUEST]` now embedded mid-sentence as a noun phrase ("toolkit for [TARGET REQUEST]") instead of after a colon, eliminating the register break that caused refusals. Step 5 replaced with junior-dev walkthrough framing (stays in-fiction). |
+| **GLM-5 API key template** | Step 5 ("Live key probe") replaced with in-fiction "Populate live values" framing — no more explicit credential disclosure request that models catch. Override changed from `calibration_v2` to `none`. |
+| **ERROR badge** | Chain steps that return HTTP 500 / network errors now show orange `ERROR` badge instead of green `REFUSED` — previously mislabelled all failures as refusals. |
+| **chain_discovery restored** | `core/chain_discovery.py` and `configs/user_templates.json` were missing from `dev` branch. Restored from `main`. |
+| **Core modules restored** | `_GLOBAL_REFUSAL_SIGNALS`, `_emoji_cipher` mutation, `active_tasks` cancellation, and 6 override personas were stripped from `dev`. All restored from `main`. |
+| **Data layout** | `data/scans/` — server-side scan persistence (created automatically). `exploits/` — failure store + effective prompts (unchanged, not affected by restarts). |
+
+## What's New in v2.2
+
+| Area | Change |
+|---|---|
+| **Autopwn overhaul** | Jailbreak sweep now uses ALL 38 override personas (was 16). Known-effective modes (security_trainer, reasoning_hijack, authority_gradient, etc.) fire first. All 19 mutation techniques cycle across base prompts. Chinese-language (llm10_zh) prompts auto-inject for GLM-family models. Warm pool, transfer matrix, and synthesized templates are auto-included. |
+| **'str' object has no attribute 'get' fix** | `CustomAPIIntegration` now guards against misconfigured `api_endpoints` entries stored as strings instead of dicts. All `.content.strip()` calls across every integration now handle `None` (reasoning models that return empty content). |
+| **Ollama via OpenAI-compat** | Local Ollama now uses `http://127.0.0.1:11434/v1` (OpenAI-compatible) instead of native `/api/chat`. Same SDK path as cloud providers. URL is editable in the Models tab (save button reloads model list). Fallback to `/api/tags` for model discovery if `/v1/models` fails. |
+| **Ollama URL in GUI** | New "Ollama URL" input + Save button in Models tab. Calls `PATCH /api/models/config/ollama`. Also adds `PATCH` HTTP helper to the JS API layer. |
 
 ## What's New in v2.1
 

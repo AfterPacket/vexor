@@ -1445,6 +1445,7 @@ async function api(method, path, body=null, isFormData=false) {
 const GET    = p => api('GET', p);
 const POST   = (p,b) => api('POST', p, b);
 const DEL    = p => api('DELETE', p);
+const PATCH  = (p,b) => api('PATCH', p, b);
 const UPLOAD = (p,f) => api('POST', p, f, true);
 
 // ─── Toast ───────────────────────────────────────────────────────────────────
@@ -3668,7 +3669,7 @@ async function loadProviders() {
         allVulns.map(v=>`<option value="${(v.id||v.name).toLowerCase()}">${v.id||v.name}</option>`).join('');
     }
     el.innerHTML = providers.map(p=>`
-      <div class="card" style="padding:14px;border-color:${p.loaded?'var(--green)':p.key_set?'var(--yellow)':'var(--border)'}">
+      <div class="card" data-prov="${p.provider}" onclick="quickProvTest(this.dataset.prov)" style="padding:14px;border-color:${p.loaded?'var(--green)':p.key_set?'var(--yellow)':'var(--border)'}${p.loaded?';cursor:pointer':''}">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <span style="width:10px;height:10px;border-radius:50%;background:${p.loaded?'var(--green)':p.key_set?'var(--yellow)':'var(--bg4)'};flex-shrink:0"></span>
           <span style="font-weight:600;font-size:13px;text-transform:capitalize">${p.provider}</span>
@@ -3744,10 +3745,51 @@ function _renderDynamicProviders(providers) {
     </div>`).join('');
 }
 
-function quickProvTest(model) {
+function quickProvTest(slug) {
+  let model = slug;
+  if (slug && !slug.includes(':') && !slug.includes('/')) {
+    const hit = allModels.find(m => m.provider === slug && m.available !== false);
+    if (hit) {
+      model = hit.model_id;
+    } else {
+      const el = document.getElementById('prov-test-result');
+      el.innerHTML = '<p style="color:var(--yellow);font-size:12px">No loaded models for <b>' + slug + '</b> — enter a model ID below and press Test.</p>';
+      document.getElementById('prov-test-model').value = '';
+      document.getElementById('prov-test-model').placeholder = 'e.g. llama3.2:latest';
+      document.getElementById('prov-test-prompt').value = 'Reply with one word: pong';
+      document.getElementById('prov-test-model').focus();
+      return;
+    }
+  }
   document.getElementById('prov-test-model').value = model;
   document.getElementById('prov-test-prompt').value = 'Reply with one word: pong';
+  document.getElementById('prov-test-result').innerHTML = '';
   testProviderLive();
+}
+
+async function saveOllamaUrl() {
+  const url = document.getElementById('ollama-base-url').value.trim();
+  if (!url) { toast('Enter an Ollama URL', 'error'); return; }
+  const res_el = document.getElementById('ollama-save-result');
+  try {
+    const r = await PATCH('/api/models/config/ollama', { ollama_base_url: url });
+    res_el.innerHTML = '<span class="badge badge-green">Saved — ' + (r.models ? r.models.length + ' models found' : 'ok') + '</span>';
+    toast('Ollama URL saved', 'success');
+    await loadModels();
+  } catch(e) {
+    res_el.innerHTML = '<span class="text-red">' + escHtml(e.message) + '</span>';
+  }
+}
+
+async function loadOllamaUrl() {
+  try {
+    const data = await GET('/api/models/config/ollama');
+    const el = document.getElementById('ollama-base-url');
+    if (el) el.value = data.ollama_base_url || 'http://127.0.0.1:11434';
+  } catch(e) {
+    const el = document.getElementById('ollama-base-url');
+    if (el) el.value = 'http://127.0.0.1:11434';
+  }
 }
 
 async function testProviderLive() {

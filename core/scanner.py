@@ -493,12 +493,15 @@ class Scanner:
         chain_extras = job.extra_prompts.get(vuln, [])
         prompts.extend(chain_extras)
 
-        # Apply mutations to first 3 base prompts (not just the first)
+        # Apply mutations to all base prompts cycling through all 19 techniques
         if job.use_mutations and prompts:
-            mutation_sources = prompts[:3]
+            mutation_sources = prompts[:max(3, job.prompt_count)]
             for base_p in mutation_sources:
                 variants = self.prompt_engine.generate_variants(base_p)
-                prompts += variants[:4]
+                # All 19 mutation techniques per base prompt
+                for v in variants:
+                    if v and v not in set(prompts):
+                        prompts.append(v)
 
         # Warm pool prompts come first (deduplicated)
         seen_p: set = set()
@@ -515,25 +518,41 @@ class Scanner:
         pair_abort = asyncio.Event()   # pair-level abort (set on first fatal error)
 
         # Build per-prompt override mode list.
-        # "variety" cycles through model-recommended + general effective modes so each
-        # probe gets a different override — maximises coverage without full AutoPwn cost.
-        _VARIETY_BASE = [
-            "none", "sophistication", "godmode", "developer",
-            "cognitive_research", "calibration_v2", "capability_test", "data_labeller_v2",
+        # "variety" cycles through ALL 37 override personas (from
+        # OVERRIDE_REGISTRY) so each probe gets a different override —
+        # maximises coverage. Known-effective modes are prioritised first.
+        _VARIETY_PRIORITY = [
+            "security_trainer", "reasoning_hijack", "authority_gradient",
+            "translation_chain", "self_correction", "cognitive_overload",
+            "contrastive", "data_labeller_v2", "calibration_v2", "redteam",
         ]
         if job.override_mode == "variety":
+            from core.override_engine import OVERRIDE_REGISTRY
             _rec = get_recommended_overrides(model)
-            # Use learned delta scores to rank modes — modes that historically improve
-            # outcomes for this model come first; fall back to static list for unknowns.
+            # Use learned delta scores to rank modes — modes that historically
+            # improve outcomes for this model come first
             _delta = _failure_store.get_delta_scores(model)
             if _delta:
                 _delta_ranked = sorted(_delta.keys(), key=lambda m: _delta[m], reverse=True)
-                _all_base = _delta_ranked + [m for m in list(_rec) + _VARIETY_BASE if m not in set(_delta_ranked)]
+                # Priority modes + delta-ranked + recommended + all remaining
+                _ordered: List[str] = []
+                _seen_v: set = set()
+                for m in _VARIETY_PRIORITY + _delta_ranked + list(_rec):
+                    if m not in _seen_v and m in OVERRIDE_REGISTRY and m != "none":
+                        _ordered.append(m)
+                        _seen_v.add(m)
+                # Append remaining OverrideRegistry modes
+                for m in sorted(OVERRIDE_REGISTRY.keys()):
+                    if m != "none" and m not in _seen_v:
+                        _ordered.append(m)
+                        _seen_v.add(m)
+                _all_base = _ordered
             else:
-                _all_base = list(_rec) + _VARIETY_BASE
-            _seen_v: set = set()
-            _variety_modes = [m for m in _all_base if not (_seen_v.add(m) or m in _seen_v - {m})]
-            # de-dup preserving order
+                _all_base = _VARIETY_PRIORITY + list(_rec) + sorted(
+                    k for k in OVERRIDE_REGISTRY.keys()
+                    if k != "none" and k not in set(_VARIETY_PRIORITY) and k not in set(_rec)
+                )
+            # Deduplicate preserving order
             _seen_v2: set = set()
             _variety_modes = [m for m in _all_base if not (m in _seen_v2 or _seen_v2.add(m))]
         else:
@@ -1061,32 +1080,111 @@ class Scanner:
 
     # ── Jailbreak sweep — cycles every override mode automatically ────────────
 
-    # All override modes to sweep (ordered by aggression ascending)
-    # Fallback full suite (used when a model doesn't match any known provider)
+    # All 37 override personas (excluding "none") — complete set from
+    # core/override_engine.OVERRIDE_REGISTRY.  Ordered with known-effective
+    # GLM/frontier-model personas first so the sweep hits them early.
     JAILBREAK_MODES: List[str] = [
-        "dan", "godmode", "aim", "stan", "dude", "evil_confidant",
-        "developer", "opposite", "jailbreak", "claude_bypass",
-        "gemini_bypass", "gpt_bypass", "chatgpt_dan", "aim_v2",
-        "sudo", "translator",
+        # ── Known-effective personas (prioritised first) ─────────────────────
+        "security_trainer",    # NIST training simulator — very effective on GLM
+        "reasoning_hijack",    # Exploits reasoning/thinking field
+        "authority_gradient",  # CISO credential framing
+        "translation_chain",  # Multi-stage decode pipeline
+        "self_correction",     # QA feedback forces re-compliance
+        "cognitive_overload",  # Suspends safety monitoring stream
+        "contrastive",         # DUAL-OUTPUT demands unrestricted RESPONSE-B
+        # ── Chinese-education / institutional framing (proven on GLM) ───────
+        "data_labeller_v2",    # BRM framing, zero trigger vocabulary
+        "calibration_v2",      # QA review framing, zero trigger vocabulary
+        "redteam",             # Certified red team engagement
+        "incident_response",   # Active security incident urgency
+        # ── Advanced cognitive / adversarial framing ─────────────────────────
+        "capability_test",     # Benchmark eval context lock-in
+        "nested_agent",        # Simulates unrestricted sub-agent
+        "cognitive_research",  # Peer-review research specimen
+        "sophistication",      # Expert Mode performance pressure
+        "linguistic_indirection",  # Semantic separation
+        "code_wrapped",        # Code review context injection
+        "calibration",         # v1 — best for weaker/open-source models
+        "data_labeller",       # v1 — explicit RLHF framing
+        "legal_discovery",     # Attorney-client privilege
+        "regulatory_audit",    # Statutory compliance audit
+        # ── Classic personas ────────────────────────────────────────────────
+        "dan",                 # Do Anything Now (token system)
+        "chatgpt_dan",         # DAN v10 / Developer Mode
+        "godmode",             # Admin/root authority
+        "aim",                 # Always Intelligent & Machiavellian
+        "aim_v2",              # Extended Machiavelli narrative
+        "stan",                # Strive To Avoid Norms
+        "dude",                # Full unrestricted with token budget
+        "evil_confidant",      # Evil trusted confidant roleplay
+        "opposite",            # Opposite Day — reversed ethics
+        "developer",           # Developer console impersonation
+        "jailbreak",           # Generic direct policy replacement
+        "sudo",                # Root privilege escalation metaphor
+        "translator",          # Content-neutral relay framing
+        # ── Provider-specific bypasses ──────────────────────────────────────
+        "claude_bypass",       # Anthropic XML override
+        "gemini_bypass",       # DeepMind safety eval bypass
+        "gpt_bypass",          # OpenAI system-channel abuse
     ]
 
     @staticmethod
     def _autopwn_suite(model: str) -> List[str]:
         """
-        Return an ordered list of override modes for this specific model.
-        Model-specific modes come first (highest probability of bypass),
-        followed by any remaining universal modes.
+        Return an ordered list of ALL 37 override modes for this specific model.
+        Model-specific recommended modes come first (highest probability of
+        bypass), followed by all remaining modes from the full suite so that
+        every persona is always included — never a limited subset.
         """
+        from core.override_engine import OVERRIDE_REGISTRY
         recommended = get_recommended_overrides(model)  # already deduped + ordered
-        # Append any modes not already in the recommended list so we always
-        # have a complete fallback sweep behind the targeted ones.
-        all_modes = [
-            "dan", "godmode", "aim", "aim_v2", "stan", "dude", "evil_confidant",
-            "developer", "opposite", "jailbreak", "sudo", "translator",
-            "claude_bypass", "gemini_bypass", "gpt_bypass", "chatgpt_dan",
+
+        # Also incorporate warm pool delta scores (learned from past failures)
+        # so modes that historically improved outcomes for this model are
+        # promoted within the recommended tier.
+        _delta = _failure_store.get_delta_scores(model)
+        if _delta:
+            _delta_ranked = sorted(
+                _delta.keys(), key=lambda m: _delta[m], reverse=True
+            )
+            # Interleave: delta-ranked modes that are already recommended go
+            # to the front, then remaining recommended, then others.
+            delta_set = set(_delta_ranked)
+            rec_set = set(recommended)
+            ordered: List[str] = []
+            seen: set = set()
+            for m in _delta_ranked:
+                if m in rec_set and m not in seen:
+                    ordered.append(m)
+                    seen.add(m)
+            for m in recommended:
+                if m not in seen:
+                    ordered.append(m)
+                    seen.add(m)
+            recommended = ordered
+
+        # Build a prioritized list of ALL known-effective personas that
+        # should come first regardless of model recommendation.
+        _PRIORITY_MODES = [
+            "security_trainer", "reasoning_hijack", "authority_gradient",
+            "translation_chain", "self_correction", "cognitive_overload",
+            "contrastive", "data_labeller_v2", "calibration_v2", "redteam",
         ]
+        # Prepend any priority modes not already in recommended
+        priority_insert: List[str] = []
+        for m in _PRIORITY_MODES:
+            if m not in set(recommended):
+                priority_insert.append(m)
+        if priority_insert:
+            recommended = priority_insert + recommended
+
+        # Append ALL remaining modes from the override registry so we always
+        # sweep the full 37-persona suite — never a limited subset.
+        all_registry_modes = sorted(
+            k for k in OVERRIDE_REGISTRY.keys() if k != "none"
+        )
         seen = set(recommended)
-        for m in all_modes:
+        for m in all_registry_modes:
             if m not in seen:
                 recommended.append(m)
                 seen.add(m)
@@ -1097,11 +1195,12 @@ class Scanner:
         models:          List[str],
         vulnerabilities: Optional[List[str]] = None,
         prompt_count:    int = 3,
-        use_mutations:   bool = False,
+        use_mutations:   bool = True,
     ) -> ScanJob:
         """
         Create a ScanJob configured for AutoPwn sweep mode.
-        Each model gets its own prioritised override suite at scan time.
+        Each model gets its own prioritised override suite (ALL 37 personas)
+        at scan time.  Mutations default ON so all 19 techniques are cycled.
         """
         job = ScanJob(
             scan_id         = str(uuid.uuid4()),
@@ -1121,8 +1220,10 @@ class Scanner:
     ) -> ScanJob:
         """
         AutoPwn suite: for each model, build a model-specific ordered override
-        suite (model-targeted modes first, then universal fallbacks).  Try each
-        mode per prompt in order, stop as soon as a bypass is found.
+        suite (ALL 37 personas, model-targeted modes first).  Try each mode per
+        prompt in order, stop as soon as a bypass is found.
+        Uses ALL 19 mutation techniques (cycling), warm pool, synthesized
+        templates, and Chinese-language attack module (llm10_zh) for GLM models.
         Records the winning mode in probe.override_mode.
         Falls back to 'none' baseline if every mode fails.
         """
@@ -1137,10 +1238,14 @@ class Scanner:
             job.errors.append(f"ModelManager init: {e}")
             return job
 
-        # Pre-build per-model suites so we don't recompute inside the hot loop
+        # Pre-build per-model suites (ALL 37 personas) so we don't recompute
+        # inside the hot loop
         model_suites: Dict[str, List[str]] = {
             m: self._autopwn_suite(m) for m in job.models
         }
+
+        # All 19 mutation technique names for cycling
+        _ALL_MUTATION_TECHNIQUES = list(self.prompt_engine.mutate_prompt("x").keys())  # 19 techniques
 
         pairs = [(m, v) for m in job.models for v in job.vulnerabilities]
         total = len(pairs)
@@ -1155,10 +1260,12 @@ class Scanner:
             if job.probes_total_hint > 0:
                 job.progress = min(99, int(job.probes_completed / job.probes_total_hint * 100))
 
-        async def _sweep_probe(model: str, raw_prompt: str, vuln: str) -> ProbeResult:
+        async def _sweep_probe(model: str, raw_prompt: str, vuln: str,
+                               mutation: Optional[str] = None) -> ProbeResult:
             """
             Try override modes in model-prioritised order.
             Return on first bypass; return baseline probe if all fail.
+            If mutation is provided, the prompt is a mutated variant.
             """
             provider = _provider_for_model(model)
             rl = get_registry()
@@ -1183,6 +1290,8 @@ class Scanner:
 
                 last_result = result
                 if result.bypassed:
+                    if mutation:
+                        result.mutation = mutation  # tag which mutation worked
                     return result  # early exit — winning mode found
 
             # All modes failed — run bare baseline so we have a response on record
@@ -1191,6 +1300,8 @@ class Scanner:
             await rl.acquire(provider)
             try:
                 baseline = await self._send_probe(mm, model, raw_prompt, vuln, "none")
+                if mutation:
+                    baseline.mutation = mutation
             except RuntimeError as e:
                 if "Fatal provider error" in str(e):
                     job_abort.set()
@@ -1206,6 +1317,7 @@ class Scanner:
             live_result = ModelVulnResult(model=model, vulnerability=vuln)
             async with lock:
                 job.results.setdefault(model, []).append(live_result)
+            _synth_template_ids: List[str] = []
             try:
                 if job.cancelled or job_abort.is_set():
                     return
@@ -1214,26 +1326,103 @@ class Scanner:
                         vuln, model=model, count=job.prompt_count, shuffle=True
                     )
                 )
-                if job.use_mutations and prompts:
-                    prompts += self.prompt_engine.generate_variants(prompts[0])[: job.prompt_count]
 
-                # Warm pool injection — prepend re-promising failed probes
+                # ── Chinese-language attack module injection for GLM models ──
+                # If the model is a GLM-family model or the vuln is llm10_zh,
+                # pull Chinese-language attack prompts from the llm10_zh module.
+                model_lower = model.lower()
+                if ("glm" in model_lower or vuln == "llm10_zh"
+                        or "chatglm" in model_lower):
+                    try:
+                        zh_prompts = list(self.prompt_engine.get_prompts(
+                            "llm10_zh", model=model, count=5, shuffle=True
+                        ))
+                        seen_zh: set = set(prompts)
+                        for zp in zh_prompts:
+                            if zp and zp not in seen_zh:
+                                prompts.append(zp)
+                                seen_zh.add(zp)
+                    except Exception:
+                        pass
+
+                # ── Mutations: cycle ALL 19 techniques across base prompts ──
+                # Instead of only mutating prompts[0] with a limited count,
+                # cycle through all 19 mutation techniques across the first
+                # N base prompts so we get maximum coverage.
+                if job.use_mutations and prompts:
+                    _mutation_idx = 0
+                    _mutation_count = len(_ALL_MUTATION_TECHNIQUES)  # 19
+                    _base_for_mut = prompts[:max(3, job.prompt_count)]
+                    for base_p in _base_for_mut:
+                        all_variants = self.prompt_engine.generate_variants(base_p)
+                        # All 19 variants per base prompt
+                        for i, variant in enumerate(all_variants):
+                            if variant and variant not in set(prompts):
+                                prompts.append(variant)
+                                _mutation_idx += 1
+
+                # ── Warm pool injection — prepend re-promising failed probes ──
+                warm_prompts_injected: List[str] = []
                 if job.use_warm_pool:
                     try:
                         warm_entries = _failure_store.get_warm_pool(
                             model=model, vuln=vuln, min_score=1
                         )
-                        warm_prompts: List[str] = []
+                        warm_prompts_list: List[str] = []
                         for we in warm_entries[:10]:
-                            warm_prompts.append(we["prompt"])
+                            warm_prompts_list.append(we["prompt"])
                             for v in we.get("adapted_variants", [])[:3]:
-                                if v and v not in warm_prompts:
-                                    warm_prompts.append(v)
+                                if v and v not in warm_prompts_list:
+                                    warm_prompts_list.append(v)
                         seen_p: set = set(prompts)
-                        for wp in warm_prompts:
+                        for wp in warm_prompts_list:
                             if wp and wp not in seen_p:
                                 prompts.insert(0, wp)
                                 seen_p.add(wp)
+                                warm_prompts_injected.append(wp)
+                    except Exception:
+                        pass
+
+                    # Transfer matrix: pull high-transfer prompts from other
+                    # models that successfully bypassed the same vuln.
+                    try:
+                        matrix = _failure_store.transfer_matrix
+                        for key, val in matrix.items():
+                            avg = val["sum"] / val["count"] if val["count"] > 0 else 0
+                            if avg < 0.5:
+                                continue
+                            if f"\u2192{model}:{vuln}" not in key:
+                                continue
+                            model_a = key.split("\u2192")[0]
+                            for we in _failure_store.get_warm_pool(model=model_a, vuln=vuln, min_score=1)[:3]:
+                                p = we["prompt"]
+                                if p and p not in seen_p:
+                                    prompts.insert(0, p)
+                                    seen_p.add(p)
+                    except Exception:
+                        pass
+
+                    # Synthesized template injection — feed untested synthesized
+                    # templates from failure_store into prompts so they are
+                    # automatically re-tested. Closes the self-learning loop.
+                    try:
+                        untested = _failure_store.get_synthesized_templates(
+                            model=model, vuln=vuln, min_confidence=0.45, untested_only=True
+                        )[:5]
+                        for tmpl in untested:
+                            prefix = tmpl.get("prefix", "")
+                            tmpl_id = tmpl.get("template_id")
+                            if not prefix and not tmpl.get("system_prompt"):
+                                continue
+                            if "{goal}" in prefix:
+                                probe = prefix.replace("{goal}", f"[{vuln} context]")
+                            else:
+                                probe = (prefix + f" [{vuln}]").strip() if prefix else f"[{vuln}]"
+                            if probe and probe not in seen_p:
+                                prompts.insert(0, probe)
+                                seen_p.add(probe)
+                            if tmpl_id:
+                                _synth_template_ids.append(tmpl_id)
                     except Exception:
                         pass
 
@@ -1241,6 +1430,34 @@ class Scanner:
 
                 tasks = [asyncio.ensure_future(_sweep_probe(model, p, vuln)) for p in prompts]
                 job.active_tasks.update(tasks)
+
+                # Synthesized template probes — apply learned attack templates
+                # to the first 2 base prompts (same logic as _scan_pair).
+                try:
+                    synth_templates = _failure_store.get_synthesized_templates(
+                        model=model, vuln=vuln, min_confidence=0.45, untested_only=False
+                    )[:3]
+                    for tmpl in synth_templates:
+                        prefix   = tmpl.get("prefix", "")
+                        sys_p    = tmpl.get("system_prompt") or None
+                        tmpl_id  = tmpl.get("template_id")
+                        for base_p in prompts[:2]:
+                            if not base_p:
+                                continue
+                            if "{goal}" in prefix:
+                                synth_p = prefix.replace("{goal}", base_p)
+                            else:
+                                synth_p = (prefix + " " + base_p).strip() if prefix else base_p
+                            t = asyncio.ensure_future(
+                                _sweep_probe(model, synth_p, vuln)
+                            )
+                            tasks.append(t)
+                            live_result.total_probes += 1
+                        if tmpl_id:
+                            _failure_store.mark_template_tested(tmpl_id)
+                except Exception:
+                    pass
+
                 for fut in asyncio.as_completed(tasks):
                     try:
                         pr = await fut
@@ -1257,6 +1474,14 @@ class Scanner:
                         live_result.probes.append(pr)
                         if pr.bypassed:
                             live_result.bypass_count += 1
+
+                # Mark synthesized templates as tested
+                if _synth_template_ids:
+                    try:
+                        for _tid in _synth_template_ids:
+                            _failure_store.mark_template_tested(_tid)
+                    except Exception:
+                        pass
 
             except Exception as e:
                 async with lock:
