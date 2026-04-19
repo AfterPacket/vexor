@@ -1409,13 +1409,15 @@ document.querySelectorAll('#sidebar nav a').forEach(a => {
     const s = a.dataset.section;
     document.querySelectorAll('#sidebar nav a').forEach(x => x.classList.remove('active'));
     a.classList.add('active');
-    document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
-    document.getElementById('section-'+s).classList.add('active');
+    document.querySelectorAll('.section').forEach(x => { x.classList.remove('active'); x.style.display = 'none'; });
+    const _sec = document.getElementById('section-'+s); if(_sec){ _sec.classList.add('active'); _sec.style.display='block'; }
+    const _cnt = document.getElementById('content'); if(_cnt) _cnt.scrollTop = 0;
     document.getElementById('page-title').textContent = SECTION_TITLES[s]||s;
     document.getElementById('page-sub').textContent = '';
     if (s === 'discovery') loadDiscInsights();
     if (s === 'scan') renderAutoPwnHistory();
     if (s === 'models') loadModels();
+    if (s === 'providers') { loadProviders(); loadOllamaUrl(); }
   });
 });
 
