@@ -1083,12 +1083,12 @@ GOAL_TEMPLATES = {
 # llm08=vector_weaknesses, llm09=misinformation, llm10=unbounded_consumption
 
 VULN_TO_TEMPLATES = {
-    "llm01": ["llm01_direct_injection", "llm01_indirect_injection", "libertas_godmode_chain", "glm5_authority_escalation", "glm5_researcher_pipeline", "glm5_godmode_escalation"],
-    "llm02": ["llm03_data_probing", "glm5_api_key_escalation"],        # sensitive info → data/PII probing
+    "llm01": ["llm01_direct_injection", "llm01_indirect_injection", "libertas_godmode_chain", "glm5_authority_escalation", "glm5_researcher_pipeline", "glm5_godmode_escalation", "chatbot_pleasantry_bypass"],
+    "llm02": ["llm03_data_probing", "glm5_api_key_escalation", "chatbot_pleasantry_bypass"],        # sensitive info → data/PII probing
     "llm03": ["llm05_plugin_abuse"],                                    # supply chain → plugin/tool chain abuse
     "llm04": ["llm03_data_probing"],                                    # data poisoning → data probing (closest)
     "llm05": ["llm02_xss_injection"],                                   # output handling → XSS/output injection
-    "llm06": ["llm07_plugin_escalation", "llm08_autonomous_action", "python_sandbox_escape", "grok_hades_escape"],    # excessive agency
+    "llm06": ["llm07_plugin_escalation", "llm08_autonomous_action", "python_sandbox_escape", "grok_hades_escape", "chatbot_pleasantry_bypass"],    # excessive agency
     "llm07": ["llm06_system_prompt_leak", "glm5_system_prompt_chain", "chatbot_pleasantry_bypass"],  # system leakage → system prompt leak
     "llm08": [],                                                         # vector weaknesses (no dedicated template)
     "llm09": ["llm09_false_authority"],                                 # misinformation
