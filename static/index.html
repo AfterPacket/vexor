@@ -1858,11 +1858,12 @@ async function loadChainTemplate() {
     const el = document.getElementById('chain-steps');
     el.innerHTML = '';
     (tpl.steps || []).forEach(s => addChainStep(s.prompt, s.override_mode, s.label));
-    // Pre-fill target request field if the template declares a default
-    if (tpl.default_target) {
-      const targetEl = document.getElementById('chain-target-request');
-      if (targetEl && !targetEl.value.trim()) targetEl.value = tpl.default_target;
-    }
+    // Always populate target + system from template
+    const targetEl = document.getElementById('chain-target-request');
+    const systemEl = document.getElementById('chain-system');
+    if (tpl.default_target && targetEl) targetEl.value = tpl.default_target;
+    if (tpl.base_system && systemEl) systemEl.value = tpl.base_system;
+    else if (systemEl && !tpl.base_system) systemEl.value = '';
   } catch(e) { toast(e.message, 'error'); }
 }
 
