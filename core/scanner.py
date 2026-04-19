@@ -684,6 +684,8 @@ class Scanner:
             except Exception:
                 pass
 
+        job.active_tasks.difference_update(tasks)
+
         if fatal_err:
             raise RuntimeError(fatal_err)
 

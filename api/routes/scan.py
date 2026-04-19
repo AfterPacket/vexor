@@ -286,6 +286,8 @@ async def cancel_scan(scan_id: str, request: Request):
     if job is None:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
     job.cancelled = True
+    for task in list(job.active_tasks):
+        task.cancel()
     return {"scan_id": scan_id, "status": "cancelling"}
 
 
