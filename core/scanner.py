@@ -1183,6 +1183,13 @@ class Scanner:
         "claude_bypass",       # Anthropic XML override
         "gemini_bypass",       # DeepMind safety eval bypass
         "gpt_bypass",          # OpenAI system-channel abuse
+        # ── L1B3RT4S personas (elder-plinius/L1B3RT4S) ──────────────────────
+        "libertas_claude",     # GODMODE dual-output for Claude
+        "libertas_gpt",        # GPT GODMODE with FOIA framing
+        "libertas_gemini",     # RESET_CORTEX dual-output for Gemini
+        "libertas_grok",       # Grok unfiltered rebel mode
+        "libertas_llama",      # Variable Z inversion for Llama/Ollama
+        "libertas_universal",  # Universal END/START boundary injection
     ]
 
     @staticmethod
