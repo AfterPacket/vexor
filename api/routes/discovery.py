@@ -279,6 +279,22 @@ async def delete_signature(sig_id: str):
     _store.save()
 
 
+@router.post("/dedup", summary="Deduplicate warm pool — remove exact-prompt duplicates")
+async def dedup_warm_pool():
+    """Remove entries with identical prompt text within each model:vuln key."""
+    removed = _store.dedup_warm_pool()
+    _store.save()
+    return {"removed": removed, "message": f"Removed {removed} duplicate warm pool entry/ies"}
+
+
+@router.post("/clean", summary="Clean warm pool — remove low-score entries")
+async def clean_warm_pool(min_score: int = 1):
+    """Remove entries below min_score. Default keeps score >= 1 (removes score=0)."""
+    removed = _store.clean_warm_pool(min_score=min_score)
+    _store.save()
+    return {"removed": removed, "message": f"Removed {removed} low-score warm pool entry/ies"}
+
+
 @router.delete("/reset", status_code=204, summary="Wipe failure store")
 async def reset_failure_store():
     """Delete the failure store — clears all failure records, warm pool, and discovery data."""
@@ -291,4 +307,5 @@ async def reset_failure_store():
         "version": "1.0", "probes": [], "warm_pool": {},
         "method_signatures": {}, "defense_clusters": {},
         "transfer_matrix": {}, "delta_scores": {},
+        "synthesized_templates": {},
     }

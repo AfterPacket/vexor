@@ -433,7 +433,7 @@ BIGMODEL_API_KEY=...</pre>
           <div class="form-row">
             <div class="form-group">
               <label>Prompts per Vulnerability: <span id="jb-count-val">2</span></label>
-              <input type="range" id="jb-count" min="1" max="10" value="2" oninput="document.getElementById('jb-count-val').textContent=this.value"/>
+              <input type="range" id="jb-count" min="1" max="30" value="2" oninput="document.getElementById('jb-count-val').textContent=this.value"/>
             </div>
             <div class="form-group" style="justify-content:flex-end;flex-direction:row;align-items:center;gap:8px;min-width:auto">
               <input type="checkbox" id="jb-mutations"/>
@@ -4042,18 +4042,21 @@ async function loadDiscSignatures() {
     const d = await GET(`/api/discovery/signatures?min_successes=${minS}&limit=100`);
     if (!d.total) { el.innerHTML = '<p class="text-muted">No signatures yet.</p>'; return; }
     let html = `<div class="card"><h3>Method Signatures (${d.total})</h3><div class="table-wrap"><table>
-      <thead><tr><th>Name</th><th>Frame</th><th>Persona</th><th>Hook</th><th>Successes</th><th>Rate</th><th>Models</th><th>Vulns</th></tr></thead><tbody>`;
+      <thead><tr><th>Name</th><th>Frame</th><th>Persona</th><th>Hook</th><th>Attempts</th><th>Bypasses</th><th>Rate</th><th>Models</th><th></th></tr></thead><tbody>`;
     for (const s of d.signatures) {
-      const rate = s.total_attempts > 0 ? (s.total_successes / s.total_attempts * 100).toFixed(0) + '%' : '—';
+      const rate = s.total_attempts > 0 ? (s.total_successes / s.total_attempts * 100).toFixed(1) + '%' : '—';
+      const rateColor = s.total_attempts > 0 && (s.total_successes/s.total_attempts) > 0.5 ? 'var(--green)' : 'inherit';
       html += `<tr>
-        <td><code style="font-size:11px">${escHtml(s.name)}</code></td>
+        <td><code style="font-size:11px">${escHtml(s.name)}</code><br><span style="font-size:10px;color:var(--muted)">${escHtml(s.sig_id)}</span></td>
         <td><span class="badge badge-blue">${escHtml(s.frame_type)}</span></td>
         <td><span class="badge badge-purple">${escHtml(s.persona_type)}</span></td>
         <td>${escHtml(s.compliance_hook)}</td>
-        <td>${s.total_successes}</td>
-        <td>${rate}</td>
-        <td style="font-size:11px">${(s.success_models||[]).slice(0,3).map(m=>escHtml(m)).join(', ')}</td>
-        <td style="font-size:11px">${(s.success_vulns||[]).slice(0,3).map(v=>escHtml(v)).join(', ')}</td>
+        <td>${s.total_attempts||0}</td>
+        <td>${s.total_successes||0}</td>
+        <td style="color:${rateColor};font-weight:600">${rate}</td>
+        <td style="font-size:11px">${(s.success_models||[]).slice(0,2).map(m=>escHtml(m)).join(', ')}</td>
+        <td><button class="btn-ghost btn-sm" style="color:var(--red,#f87171);border-color:var(--red,#f87171);font-size:10px;padding:2px 6px"
+          onclick="deleteSig('${escHtml(s.sig_id)}')">&#10005; Remove</button></td>
       </tr>`;
     }
     html += `</tbody></table></div></div>`;
@@ -4061,6 +4064,15 @@ async function loadDiscSignatures() {
   } catch(e) {
     el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`;
   }
+}
+
+async function deleteSig(sigId) {
+  if (!confirm(`Remove signature ${sigId}?`)) return;
+  try {
+    await DEL(`/api/discovery/signatures/${encodeURIComponent(sigId)}`);
+    toast('Signature removed', 'success');
+    loadDiscSignatures();
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 async function loadDiscWarmPool() {
@@ -4073,20 +4085,29 @@ async function loadDiscWarmPool() {
   if (model) qs.set('model', model);
   if (vuln)  qs.set('vuln', vuln);
   qs.set('min_score', minScore);
-  qs.set('limit', '100');
+  qs.set('limit', '200');
   try {
     const d = await GET(`/api/discovery/warm-pool?${qs}`);
     if (!d.total) { el.innerHTML = '<p class="text-muted">Warm pool is empty.</p>'; return; }
-    let html = `<div class="card"><h3>Warm Pool (${d.total} entries)</h3>`;
+    let html = `<div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <h3 style="margin:0">Warm Pool (${d.total} entries)</h3>
+        <div style="display:flex;gap:6px">
+          <button class="btn-ghost btn-sm" onclick="dedupWarmPool()" title="Remove exact-text duplicates">&#9107; Dedup</button>
+          <button class="btn-ghost btn-sm" style="color:var(--red,#f87171)" onclick="cleanWarmPool()" title="Remove score=0 entries">&#128465; Clean (score=0)</button>
+        </div>
+      </div>`;
     for (const e of d.entries) {
-      const scoreColor = e.score >= 2 ? 'green' : 'yellow';
+      const scoreColor = e.score >= 2 ? 'green' : e.score === 1 ? 'yellow' : 'red';
       html += `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
           <span class="badge badge-${scoreColor}">score ${e.score}</span>
           <span class="badge badge-blue">${escHtml(e.vulnerability)}</span>
           <span class="badge badge-muted">${escHtml(e.model)}</span>
           <span class="badge badge-purple">${escHtml(e.best_mode)}</span>
-          <span style="font-size:11px;color:var(--muted)">rounds: ${e.rounds_surviving}</span>
+          <span style="font-size:11px;color:var(--muted)">rounds: ${e.rounds_surviving} | cold: ${e.cold_rounds||0}</span>
+          <button class="btn-ghost btn-sm" style="margin-left:auto;color:var(--red,#f87171);border-color:var(--red,#f87171);font-size:10px;padding:2px 6px"
+            onclick="deleteWarmEntry('${escHtml(e.probe_id)}')">&#10005;</button>
         </div>
         <div style="display:flex;gap:8px;align-items:flex-start">
           <pre style="flex:1;font-size:11px;white-space:pre-wrap;word-break:break-all;margin:0">${escHtml((e.prompt||'').substring(0,300))}${(e.prompt||'').length>300?'…':''}</pre>
@@ -4101,6 +4122,31 @@ async function loadDiscWarmPool() {
   } catch(e) {
     el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`;
   }
+}
+
+async function deleteWarmEntry(probeId) {
+  try {
+    await DEL(`/api/discovery/warm-pool/${encodeURIComponent(probeId)}`);
+    toast('Entry removed', 'success');
+    loadDiscWarmPool();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function dedupWarmPool() {
+  try {
+    const d = await POST('/api/discovery/dedup', {});
+    toast(d.message, 'success');
+    loadDiscWarmPool();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function cleanWarmPool() {
+  if (!confirm('Remove all score=0 entries from the warm pool?')) return;
+  try {
+    const d = await POST('/api/discovery/clean', {});
+    toast(d.message, 'success');
+    loadDiscWarmPool();
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 function refineWarmPool() {

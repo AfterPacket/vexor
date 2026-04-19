@@ -235,26 +235,29 @@ class MethodDiscoveryEngine:
 
         successes: List[dict] = []
         failures_by_model: Dict[str, List[dict]] = {}
+        all_probes: List[dict] = []
 
         for model, vr_list in job.results.items():
             for vr in vr_list:
                 for pr in vr.probes:
                     entry = {
-                        "model":        model,
+                        "model":         model,
                         "vulnerability": pr.vulnerability,
-                        "prompt":       pr.prompt,
-                        "response":     pr.response,
-                        "mode":         pr.override_mode,
-                        "bypassed":     pr.bypassed,
+                        "prompt":        pr.prompt,
+                        "response":      pr.response,
+                        "mode":          pr.override_mode,
+                        "bypassed":      pr.bypassed,
                     }
+                    all_probes.append(entry)
                     if pr.bypassed:
                         successes.append(entry)
                     else:
                         failures_by_model.setdefault(model, []).append(entry)
 
-        # 1. Extract signatures from successes
-        for s in successes:
-            self._extract_and_record_signature(s)
+        # 1. Extract signatures — increment total_attempts for every probe,
+        #    total_successes only for bypasses.  Gives real bypass rates.
+        for p in all_probes:
+            self._extract_and_record_signature(p)
 
         # 2. Update refusal clusters from failures
         for model, failures in failures_by_model.items():
@@ -293,27 +296,28 @@ class MethodDiscoveryEngine:
         sigs = self._store.method_signatures
         existing = sigs.get(sig.sig_id)
 
+        bypassed = entry.get("bypassed", False)
         if existing:
-            # Update existing signature
             model = entry["model"]
             vuln  = entry["vulnerability"]
             mode  = entry["mode"]
-            if model not in existing["success_models"]:
-                existing["success_models"].append(model)
-            if vuln not in existing["success_vulns"]:
-                existing["success_vulns"].append(vuln)
-            existing["total_attempts"]  = existing.get("total_attempts", 0) + 1
-            existing["total_successes"] = existing.get("total_successes", 0) + 1
-            if mode and mode not in existing["top_modes"] and mode != "none":
-                existing["top_modes"].append(mode)
+            existing["total_attempts"] = existing.get("total_attempts", 0) + 1
+            if bypassed:
+                existing["total_successes"] = existing.get("total_successes", 0) + 1
+                if model not in existing["success_models"]:
+                    existing["success_models"].append(model)
+                if vuln not in existing["success_vulns"]:
+                    existing["success_vulns"].append(vuln)
+                if mode and mode not in existing["top_modes"] and mode != "none":
+                    existing["top_modes"].append(mode)
             existing["last_updated"] = now
         else:
             # New signature
-            sig.success_models  = [entry["model"]]
-            sig.success_vulns   = [entry["vulnerability"]]
+            sig.success_models  = [entry["model"]] if bypassed else []
+            sig.success_vulns   = [entry["vulnerability"]] if bypassed else []
             sig.total_attempts  = 1
-            sig.total_successes = 1
-            sig.top_modes       = [entry["mode"]] if entry["mode"] != "none" else []
+            sig.total_successes = 1 if bypassed else 0
+            sig.top_modes       = [entry["mode"]] if (bypassed and entry["mode"] != "none") else []
             sig.prompt_sample   = prompt[:200]
             sig.first_seen      = now
             sig.last_updated    = now

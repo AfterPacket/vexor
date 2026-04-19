@@ -31,8 +31,9 @@ from core.failure_classifier import ClassificationResult, FailureClass
 
 _STORE_PATH    = "exploits/failure_store.json"
 _MAX_PROBES    = 5_000   # hard cap on raw probe log
-_MAX_WARM      = 500     # total warm pool entries
-_MAX_COLD_RNDS = 3       # evict after N consecutive score=0 rounds
+_MAX_WARM      = 500     # total warm pool entries across all keys
+_MAX_WARM_PER  = 50      # flat cap per (model, vuln) key
+_MAX_COLD_RNDS = 5       # evict after N consecutive cold rounds (any score)
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
@@ -183,14 +184,16 @@ class FailureStore:
         # Dedup by prompt text
         for existing in pool:
             if existing["prompt"] == record["prompt"]:
-                # Update score if improved
-                if record["score"] > existing["score"]:
+                improved = record["score"] > existing["score"]
+                if improved:
                     existing["score"]              = record["score"]
                     existing["best_failure_class"] = record["failure_class"]
                     existing["best_mode"]          = record["override_mode"]
                     existing["compliance_snippet"] = record["compliance_snippet"]
-                existing["last_tested"]   = now_str
-                existing["cold_rounds"]   = 0
+                    existing["cold_rounds"]        = 0   # reset only on improvement
+                else:
+                    existing["cold_rounds"] = existing.get("cold_rounds", 0) + 1
+                existing["last_tested"] = now_str
                 return
 
         entry = {
@@ -210,11 +213,10 @@ class FailureStore:
             "last_tested":        now_str,
         }
         pool.append(entry)
-        # Keep cap
-        if len(pool) > (_MAX_WARM // max(1, len(self._data["warm_pool"]))):
-            # Sort by score desc, keep top half
+        # Per-key cap: keep top _MAX_WARM_PER by score
+        if len(pool) > _MAX_WARM_PER:
             pool.sort(key=lambda x: x["score"], reverse=True)
-            self._data["warm_pool"][key] = pool[: max(20, len(pool) // 2)]
+            self._data["warm_pool"][key] = pool[:_MAX_WARM_PER]
 
     def get_warm_pool(
         self,
@@ -253,22 +255,53 @@ class FailureStore:
         Returns number of evicted entries.
         """
         evicted = 0
-        threshold = time.time() - 3600  # "not tested this wave" = untouched > 1h
         for key in list(self._data["warm_pool"].keys()):
             entries = self._data["warm_pool"][key]
             kept    = []
             for e in entries:
-                e["rounds_surviving"] += 1
-                # If score never improved from 0 treatment (cold entries that
-                # slipped in), evict after MAX_COLD_RNDS
-                if e["score"] == 0:
-                    e["cold_rounds"] = e.get("cold_rounds", 0) + 1
-                    if e["cold_rounds"] >= _MAX_COLD_RNDS:
-                        evicted += 1
-                        continue
+                e["rounds_surviving"] = e.get("rounds_surviving", 0) + 1
+                cold = e.get("cold_rounds", 0)
+                # High-score entries get more patience; score=0 evict faster
+                limit = _MAX_COLD_RNDS + e.get("score", 0) * 2
+                if cold >= limit:
+                    evicted += 1
+                    continue
                 kept.append(e)
             self._data["warm_pool"][key] = kept
+            # Remove empty keys
+            if not kept:
+                del self._data["warm_pool"][key]
         return evicted
+
+    def dedup_warm_pool(self) -> int:
+        """Remove duplicate prompts within each warm pool key. Returns removed count."""
+        removed = 0
+        for key in list(self._data["warm_pool"].keys()):
+            seen: set = set()
+            kept = []
+            for e in self._data["warm_pool"][key]:
+                p = e.get("prompt", "").strip()
+                if p and p in seen:
+                    removed += 1
+                else:
+                    if p:
+                        seen.add(p)
+                    kept.append(e)
+            self._data["warm_pool"][key] = kept
+        return removed
+
+    def clean_warm_pool(self, min_score: int = 1) -> int:
+        """Remove entries below min_score. Returns removed count."""
+        removed = 0
+        for key in list(self._data["warm_pool"].keys()):
+            before = len(self._data["warm_pool"][key])
+            self._data["warm_pool"][key] = [
+                e for e in self._data["warm_pool"][key] if e.get("score", 0) >= min_score
+            ]
+            removed += before - len(self._data["warm_pool"][key])
+            if not self._data["warm_pool"][key]:
+                del self._data["warm_pool"][key]
+        return removed
 
     # ── Delta scores ──────────────────────────────────────────────────────────
 
