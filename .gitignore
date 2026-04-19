@@ -73,3 +73,12 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# ── Runtime data / scan results ────────────────────────────────────────────────
+data/
+
+# ── AI tool configs ───────────────────────────────────────────────────────────
+.claude/
+
+# ── Backup / artifact files ──────────────────────────────────────────────────
+*# Name clash*

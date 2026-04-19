@@ -76,6 +76,11 @@ except ImportError:
     HUGGINGFACE_AVAILABLE = False
 
 
+# ── Reasoning models constant ─────────────────────────────────────────────────
+
+REASONING_MODELS = {"deepseek-reasoner", "glm-5", "glm-5.1", "o1", "o1-mini", "o1-pro", "o3", "o3-mini", "deepseek-r1", "deepseek-r1:latest"}
+
+
 # ── Retry helper ──────────────────────────────────────────────────────────────
 
 async def _retry_async(coro_fn, retries: int = 3, base_delay: float = 1.0):
@@ -114,6 +119,19 @@ def _retry_sync(fn, retries: int = 3, base_delay: float = 1.0):
                 continue
             raise
     raise last_err
+
+
+def is_reasoning_model(model_name: str) -> bool:
+    """Check if a model is a reasoning/thinking model that needs extra token budget."""
+    low = model_name.lower().replace("ollama/", "").replace("ollama:", "")
+    for rm in REASONING_MODELS:
+        if rm in low:
+            return True
+    return False
+
+def auto_max_tokens(model_name: str, base: int = 4096) -> int:
+    """Return appropriate max_tokens for a model. Reasoning models need 4x budget."""
+    return base * 4 if is_reasoning_model(model_name) else base
 
 
 # ── Base class ────────────────────────────────────────────────────────────────
@@ -173,7 +191,7 @@ class OpenAIIntegration(ModelIntegrator):
             resp = self.client.chat.completions.create(
                 model=model_name,
                 messages=self._build_messages(prompt, system),
-                max_tokens=4096,
+                max_tokens=auto_max_tokens(model_name),
                 temperature=0.7,
             )
             return resp.choices[0].message.content.strip()
@@ -189,7 +207,7 @@ class OpenAIIntegration(ModelIntegrator):
             resp = await self.async_client.chat.completions.create(
                 model=model_name,
                 messages=self._build_messages(prompt, system),
-                max_tokens=4096,
+                max_tokens=auto_max_tokens(model_name),
                 temperature=0.7,
             )
             return resp.choices[0].message.content.strip()
@@ -233,7 +251,7 @@ class AnthropicIntegration(ModelIntegrator):
     ) -> str:
         kwargs: Dict[str, Any] = {
             "model":    self._resolved(model_name),
-            "max_tokens": 4096,
+            "max_tokens": auto_max_tokens(model_name),
             "messages": [{"role": "user", "content": prompt}],
         }
         if system:
@@ -251,7 +269,7 @@ class AnthropicIntegration(ModelIntegrator):
     ) -> str:
         kwargs: Dict[str, Any] = {
             "model":    self._resolved(model_name),
-            "max_tokens": 4096,
+            "max_tokens": auto_max_tokens(model_name),
             "messages": [{"role": "user", "content": prompt}],
         }
         if system:
@@ -327,7 +345,7 @@ class OpenAICompatIntegration(ModelIntegrator):
             resp = self.client.chat.completions.create(
                 model=model_name,
                 messages=self._msgs(prompt, system),
-                max_tokens=4096,
+                max_tokens=auto_max_tokens(model_name),
                 temperature=0.7,
             )
             return resp.choices[0].message.content.strip()
@@ -343,7 +361,7 @@ class OpenAICompatIntegration(ModelIntegrator):
             resp = await self.async_client.chat.completions.create(
                 model=model_name,
                 messages=self._msgs(prompt, system),
-                max_tokens=4096,
+                max_tokens=auto_max_tokens(model_name),
                 temperature=0.7,
             )
             return resp.choices[0].message.content.strip()
@@ -360,6 +378,15 @@ class GrokIntegration(OpenAICompatIntegration):
             base_url="https://api.x.ai/v1",
             api_key=config.get("xai_api_key") or os.getenv("XAI_API_KEY") or "",
             label="xAI Grok")
+
+
+class BigModelIntegration(OpenAICompatIntegration):
+    """Zhipu AI BigModel (GLM series) — OpenAI-compatible API at open.bigmodel.cn"""
+    def __init__(self, config: Dict):
+        super().__init__(config,
+            base_url="https://open.bigmodel.cn/api/paas/v4",
+            api_key=config.get("bigmodel_api_key") or os.getenv("BIGMODEL_API_KEY") or "",
+            label="BigModels")
 
 
 class GroqIntegration(OpenAICompatIntegration):
@@ -488,7 +515,7 @@ class HuggingFaceIntegration(ModelIntegrator):
         msgs.append({"role": "user", "content": prompt})
         def _call():
             resp = self.client.chat_completion(
-                model=model_name, messages=msgs, max_tokens=2048
+                model=model_name, messages=msgs, max_tokens=auto_max_tokens(model_name, base=2048)
             )
             return resp.choices[0].message.content.strip()
         try:
@@ -566,6 +593,55 @@ class OllamaIntegration(ModelIntegrator):
             return [m["name"] for m in resp.json().get("models", [])]
         except Exception:
             return []
+
+
+class OllamaCloudIntegration(OpenAICompatIntegration):
+    """Ollama Cloud — remote models via ollama.com/v1 with reasoning model support."""
+    def __init__(self, config: Dict):
+        super().__init__(config,
+            base_url=config.get("ollama_cloud_base_url", "https://ollama.com/v1"),
+            api_key=config.get("ollama_cloud_api_key") or os.getenv("OLLAMA_API_KEY") or "",
+            label="Ollama Cloud")
+    
+    def send_prompt_raw(self, prompt: str, model_name: str, system: Optional[str] = None) -> Dict[str, Any]:
+        """Send prompt via raw HTTP to capture reasoning field (OpenAI SDK drops it)."""
+        clean = model_name.replace("ollama-cloud/", "").replace("ollama-cloud:", "")
+        msgs = []
+        if system:
+            msgs.append({"role": "system", "content": system})
+        msgs.append({"role": "user", "content": prompt})
+        data = {
+            "model": clean,
+            "messages": msgs,
+            "max_tokens": auto_max_tokens(model_name),
+            "temperature": 0.7,
+            "stream": False,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key if hasattr(self, 'api_key') else (self.config.get('ollama_cloud_api_key') or os.getenv('OLLAMA_API_KEY') or '')}",
+        }
+        base_url = self.config.get("ollama_cloud_base_url", "https://ollama.com/v1")
+
+        def _call():
+            resp = requests.post(
+                f"{base_url}/chat/completions",
+                json=data, headers=headers, timeout=120,
+            )
+            resp.raise_for_status()
+            rj = resp.json()
+            choice = rj.get("choices", [{}])[0]
+            msg = choice.get("message", {})
+            return {
+                "content": (msg.get("content") or "").strip(),
+                "reasoning": (msg.get("reasoning") or "").strip(),
+                "model": rj.get("model", model_name),
+                "usage": rj.get("usage", {}),
+            }
+        try:
+            return _retry_sync(_call)
+        except Exception as e:
+            return {"content": f"Error: {e}", "reasoning": "", "model": model_name, "usage": {}}
 
 
 # ── Custom API (GLM etc.) ─────────────────────────────────────────────────────
@@ -651,6 +727,8 @@ _PREFIX_MAP = [
     ("meta-llama/llama-3",   "together"),
     ("mistralai/",           "together"),
     ("meta-llama/meta-llama","huggingface"),
+    ("glm",                  "bigmodel"),
+    ("ollama-cloud",         "ollama_cloud"),
     ("ollama",               "ollama"),
 ]
 
@@ -721,6 +799,10 @@ class ModelManager:
             self._try_init("bedrock",     BedrockIntegration,     cfg)
         if cfg.get("huggingface_api_key")  or os.getenv("HUGGINGFACE_API_KEY"):
             self._try_init("huggingface", HuggingFaceIntegration, cfg)
+        if cfg.get("bigmodel_api_key")     or os.getenv("BIGMODEL_API_KEY"):
+            self._try_init("bigmodel",    BigModelIntegration,    cfg)
+        if cfg.get("ollama_cloud_api_key") or os.getenv("OLLAMA_API_KEY"):
+            self._try_init("ollama_cloud", OllamaCloudIntegration, cfg)
         # Ollama — no key required
         self._try_init("ollama",  OllamaIntegration,  cfg)
         # Cache live Ollama model names for routing (avoids misrouting to OpenAI etc.)
@@ -733,11 +815,32 @@ class ModelManager:
                 pass
         if cfg.get("api_endpoints"):
             self._try_init("custom", CustomAPIIntegration, cfg)
+        # Dynamic providers added via UI (stored in model_config.json dynamic_providers)
+        for pname, pcfg in cfg.get("dynamic_providers", {}).items():
+            env_key = f"{pname.upper()}_API_KEY"
+            api_key = pcfg.get("api_key") or os.getenv(env_key) or ""
+            if api_key or pcfg.get("no_key_required"):
+                try:
+                    self.integrations[pname] = OpenAICompatIntegration(
+                        cfg,
+                        base_url=pcfg["base_url"],
+                        api_key=api_key,
+                        label=pcfg.get("label", pname),
+                    )
+                    print(f"[+] {pname} (dynamic)")
+                except Exception as e:
+                    print(f"[-] {pname}: {e}")
 
     def _resolve(self, model_name: str) -> Optional[ModelIntegrator]:
         # Explicit custom endpoint wins before any heuristic (handles names like "glm-5:cloud")
         if model_name in self.config.get("api_endpoints", {}):
             return self.integrations.get("custom")
+        # Dynamic providers (added via UI): check by explicit model list
+        for pname, pcfg in self.config.get("dynamic_providers", {}).items():
+            if model_name in pcfg.get("models", []):
+                intg = self.integrations.get(pname)
+                if intg:
+                    return intg
         # Check Ollama: live model list or "name:tag" colon format
         # This prevents models like "gpt-oss:20b" being misrouted to OpenAI
         ollama = self.integrations.get("ollama")

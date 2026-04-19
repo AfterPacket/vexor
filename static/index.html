@@ -256,10 +256,44 @@ DEEPSEEK_API_KEY=sk-...
 COHERE_API_KEY=...
 HUGGINGFACE_API_KEY=hf_...
 TOGETHER_API_KEY=...
-PERPLEXITY_API_KEY=pplx-...</pre>
+PERPLEXITY_API_KEY=pplx-...
+BIGMODEL_API_KEY=...</pre>
       </div>
       <div id="providers-list" class="card-grid">
         <div class="loading"><div class="spinner"></div>Loading provider status…</div>
+      </div>
+      <div class="card mt16">
+        <h3>Add Provider</h3>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+          Enter a provider's base URL and API key — models are discovered automatically,
+          the key is written to <code>.env</code>, and the provider is ready immediately.
+        </p>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Slug <span style="color:var(--muted);font-weight:400">(alphanumeric, e.g. openrouter)</span></label>
+            <input type="text" id="prov-add-name" placeholder="openrouter"/>
+          </div>
+          <div class="form-group">
+            <label>Display Name <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+            <input type="text" id="prov-add-label" placeholder="OpenRouter"/>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="flex:2">
+            <label>Base URL</label>
+            <input type="text" id="prov-add-url" placeholder="https://openrouter.ai/api/v1"/>
+          </div>
+          <div class="form-group">
+            <label>API Key</label>
+            <input type="password" id="prov-add-key" placeholder="sk-..."/>
+          </div>
+        </div>
+        <button id="prov-add-btn" onclick="addProvider()">Discover &amp; Add</button>
+        <div id="prov-add-result" class="mt8"></div>
+      </div>
+      <div class="card mt16" id="dynamic-providers-card" style="display:none">
+        <h3>Dynamic Providers</h3>
+        <div id="dynamic-providers-list"></div>
       </div>
       <div class="card mt16">
         <h3>Live Provider Test</h3>
@@ -564,10 +598,11 @@ PERPLEXITY_API_KEY=pplx-...</pre>
             <option value="">All Providers</option>
           </select>
           <button class="btn-ghost btn-sm" onclick="loadModels()">&#8635; Refresh</button>
-          <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
+          <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
             <input type="text" id="custom-model-id" placeholder="model id (e.g. glm-5:cloud)" style="max-width:220px"/>
-            <select id="custom-model-provider" style="max-width:130px">
+            <select id="custom-model-provider" style="max-width:130px" onchange="autoFillProviderURL()">
               <option value="ollama">ollama</option>
+              <option value="ollama-cloud">ollama-cloud</option>
               <option value="openai">openai</option>
               <option value="anthropic">anthropic</option>
               <option value="google">google</option>
@@ -580,8 +615,11 @@ PERPLEXITY_API_KEY=pplx-...</pre>
               <option value="perplexity">perplexity</option>
               <option value="bedrock">bedrock</option>
               <option value="huggingface">huggingface</option>
+              <option value="bigmodel">bigmodel</option>
               <option value="custom">custom</option>
             </select>
+            <input type="text" id="custom-model-url" placeholder="Base URL (auto-filled)" style="max-width:260px"/>
+            <input type="password" id="custom-model-key" placeholder="API Key (optional)" style="max-width:180px"/>
             <button class="btn-sm" onclick="addCustomModel()">+ Add Model</button>
           </div>
         </div>
@@ -1438,30 +1476,112 @@ function saveCustomModels(list) {
   try { localStorage.setItem(LS_CUSTOM_MODELS, JSON.stringify(list)); } catch(e) {}
 }
 
-function addCustomModel() {
-  const id  = document.getElementById('custom-model-id').value.trim();
+const PROVIDER_URLS = {
+  ollama:       'http://localhost:11434/v1',
+  'ollama-cloud':'https://ollama.com/v1',
+  openai:       'https://api.openai.com/v1',
+  anthropic:    'https://api.anthropic.com/v1',
+  google:       'https://generativelanguage.googleapis.com/v1beta',
+  xai:          'https://api.x.ai/v1',
+  groq:         'https://api.groq.com/openai/v1',
+  mistral:      'https://api.mistral.ai/v1',
+  cohere:       'https://api.cohere.ai/v1',
+  deepseek:     'https://api.deepseek.com/v1',
+  together:     'https://api.together.xyz/v1',
+  perplexity:   'https://api.perplexity.ai',
+  bedrock:      '',
+  huggingface:  'https://api-inference.huggingface.co/models',
+  bigmodel:     'https://open.bigmodel.cn/api/paas/v4',
+  custom:       ''
+};
+
+function autoFillProviderURL() {
   const prov = document.getElementById('custom-model-provider').value;
-  if (!id) { toast('Enter a model ID', 'error'); return; }
-  const customs = getCustomModels();
-  if (customs.some(m => m.model_id === id)) { toast('Already added', 'info'); return; }
-  customs.push({model_id: id, provider: prov, available: true, aliases: [], custom: true});
-  saveCustomModels(customs);
-  document.getElementById('custom-model-id').value = '';
-  loadModels();
-  toast(`Added ${id}`, 'success');
+  const urlInput = document.getElementById('custom-model-url');
+  urlInput.value = PROVIDER_URLS[prov] || '';
 }
 
-function removeCustomModel(id) {
+async function addCustomModel() {
+  const id    = document.getElementById('custom-model-id').value.trim();
+  const prov  = document.getElementById('custom-model-provider').value;
+  const url   = document.getElementById('custom-model-url').value.trim() || PROVIDER_URLS[prov] || '';
+  const key   = document.getElementById('custom-model-key').value.trim();
+  if (!id) { toast('Enter a model ID', 'error'); return; }
+
+  // Determine payload format from provider
+  const openaiCompat = ['ollama','ollama-cloud','openai','groq','together','deepseek','mistral','perplexity','xai','bigmodel','custom'];
+  const payload_format = openaiCompat.includes(prov) ? 'openai' : prov;
+
+  const payload = {
+    model_id: id,
+    url: url,
+    api_key: key || undefined,
+    payload_format: payload_format,
+    max_tokens: 4096,
+    temperature: 0.7
+  };
+
+  let apiSuccess = false;
+  try {
+    await POST('/api/models/providers/custom', payload);
+    apiSuccess = true;
+  } catch(e) {
+    toast('API save failed: ' + e.message + ' — saving locally only', 'error', 5000);
+  }
+
+  // Always save to localStorage for UI consistency
+  const customs = getCustomModels();
+  if (!customs.some(m => m.model_id === id)) {
+    customs.push({model_id: id, provider: prov, available: true, aliases: [], custom: true});
+    saveCustomModels(customs);
+  }
+
+  document.getElementById('custom-model-id').value = '';
+  document.getElementById('custom-model-key').value = '';
+  await loadModels();
+  if (apiSuccess) toast(`Added ${id}`, 'success');
+}
+
+async function removeCustomModel(id) {
+  // Try backend API delete first
+  try {
+    await DEL(`/api/models/providers/custom/${encodeURIComponent(id)}`);
+    toast(`Removed ${id} from backend`, 'success');
+  } catch(e) {
+    toast('Backend delete failed: ' + e.message + ' — removing locally', 'error', 5000);
+  }
+
+  // Always remove from localStorage too
   saveCustomModels(getCustomModels().filter(m => m.model_id !== id));
-  loadModels();
-  toast(`Removed ${id}`, 'info');
+  await loadModels();
 }
 
 async function loadModels() {
   try {
     const data = await GET('/api/models');
+    // Fetch custom endpoints so we can mark those models as deletable
+    let customModelIds = new Set();
+    try {
+      const custData = await GET('/api/models/providers/custom');
+      customModelIds = new Set(Object.keys(custData.endpoints || {}));
+    } catch(e) { /* non-fatal */ }
+    // Fetch dynamic providers so we can mark their models as deletable
+    let dynamicProviderNames = new Set();
+    try {
+      const provData = await GET('/api/models/providers');
+      (provData.providers || []).forEach(p => {
+        if (p.dynamic || p.user_added) dynamicProviderNames.add(p.provider);
+      });
+    } catch(e) { /* non-fatal */ }
+
     const apiIds = new Set(data.models.map(m => m.model_id));
-    // Merge custom models, skipping any the API already returns
+    // Mark API-returned models that come from custom endpoints or dynamic providers
+    data.models.forEach(m => {
+      if (customModelIds.has(m.model_id) || dynamicProviderNames.has(m.provider)) {
+        m.custom = true;
+      }
+    });
+    // Merge custom models from localStorage, skipping any the API already returns
     const customs = getCustomModels().filter(m => !apiIds.has(m.model_id));
     allModels = [...data.models, ...customs];
     renderModelsTable(allModels);
@@ -1475,7 +1595,7 @@ async function loadModels() {
 }
 
 function renderModelsTable(models) {
-  const provColors = {openai:'blue',anthropic:'purple',google:'yellow',groq:'green',mistral:'orange',cohere:'cyan',together:'blue',perplexity:'purple',deepseek:'red',bedrock:'orange',huggingface:'yellow',ollama:'green'};
+  const provColors = {openai:'blue',anthropic:'purple',google:'yellow',groq:'green',mistral:'orange',cohere:'cyan',together:'blue',perplexity:'purple',deepseek:'red',bedrock:'orange',huggingface:'yellow',ollama:'green','ollama-cloud':'green',bigmodel:'cyan',xai:'red',custom:'muted'};
   const tbody = document.getElementById('models-tbody');
   tbody.innerHTML = models.map(m=>`
     <tr>
@@ -3263,7 +3383,7 @@ function renderProviderGroupBtns(containerId, onToggle) {
   if (!el) return;
   const provColors = {openai:'blue',anthropic:'purple',google:'yellow',groq:'green',
     mistral:'orange',cohere:'cyan',together:'blue',perplexity:'purple',deepseek:'red',
-    bedrock:'orange',huggingface:'yellow',ollama:'green'};
+    bedrock:'orange',huggingface:'yellow',ollama:'green',bigmodel:'cyan',xai:'red',custom:'muted'};
   el.innerHTML = _providerStatus.map(p=>`
     <button class="btn-ghost btn-sm"
       style="border-color:${p.loaded?'var(--green)':p.key_set?'var(--yellow)':'var(--border)'};
@@ -3534,6 +3654,7 @@ async function loadProviders() {
     const data = await GET('/api/models/providers');
     const providers = data.providers || [];
     _providerStatus = providers;
+    _renderDynamicProviders(providers);
     const loadedCount = providers.filter(p=>p.loaded).length;
     // Build group buttons for scan and injection
     renderProviderGroupBtns('provider-group-btns', 'toggleProviderModels');
@@ -3555,7 +3676,10 @@ async function loadProviders() {
         </div>
         ${p.env_key?`<div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-family:monospace">${p.env_key}</div>`:'<div style="font-size:11px;color:var(--green);margin-bottom:6px">No key required</div>'}
         <div style="font-size:11px;color:var(--muted)">${(p.models||[]).slice(0,3).join(', ')}${(p.models||[]).length>3?` +${p.models.length-3} more`:''}</div>
-        ${p.loaded?`<div class="mt8"><button class="btn-ghost btn-sm" onclick="quickProvTest('${(p.models||[])[0]||p.provider}')">Test</button></div>`:''}
+        <div class="mt8" style="display:flex;gap:6px">
+          ${p.loaded?`<button class="btn-ghost btn-sm" onclick="quickProvTest('${(p.models||[])[0]||p.provider}')">Test</button>`:''}
+          ${p.dynamic?`<button class="btn-ghost btn-sm" style="color:var(--red)" onclick="removeProvider('${escHtml(p.provider)}')">Remove</button>`:''}
+        </div>
       </div>`).join('');
     document.getElementById('ds-overrides').textContent = loadedCount + ' loaded';
     // Update dashboard api-status-list
@@ -3563,6 +3687,59 @@ async function loadProviders() {
   } catch(e) {
     el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`;
   }
+}
+
+async function addProvider() {
+  const name   = document.getElementById('prov-add-name').value.trim();
+  const label  = document.getElementById('prov-add-label').value.trim();
+  const url    = document.getElementById('prov-add-url').value.trim();
+  const apiKey = document.getElementById('prov-add-key').value.trim();
+  const res    = document.getElementById('prov-add-result');
+  const btn    = document.getElementById('prov-add-btn');
+  if (!name || !url) { res.innerHTML = '<span class="text-red">Slug and Base URL are required.</span>'; return; }
+  res.innerHTML = '<span class="text-muted">Discovering models…</span>';
+  btn.disabled = true;
+  try {
+    const data = await POST('/api/models/providers', {name, label, base_url: url, api_key: apiKey});
+    const count = (data.models||[]).length;
+    res.innerHTML = `<span class="text-green">Added <strong>${escHtml(name)}</strong> — ${count} model${count!==1?'s':''} discovered. API key written to <code>.env</code>.</span>`;
+    document.getElementById('prov-add-name').value  = '';
+    document.getElementById('prov-add-label').value = '';
+    document.getElementById('prov-add-url').value   = '';
+    document.getElementById('prov-add-key').value   = '';
+    await Promise.all([loadProviders(), loadModels()]);
+  } catch(e) {
+    res.innerHTML = `<span class="text-red">${escHtml(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function removeProvider(name) {
+  if (!confirm(`Remove provider "${name}"? Its API key will be commented out in .env.`)) return;
+  try {
+    await DEL(`/api/models/providers/${encodeURIComponent(name)}`);
+    toast(`Removed ${name}`, 'success');
+    await Promise.all([loadProviders(), loadModels()]);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function _renderDynamicProviders(providers) {
+  const card = document.getElementById('dynamic-providers-card');
+  const list = document.getElementById('dynamic-providers-list');
+  const dynProviders = providers.filter(p => p.dynamic);
+  if (!dynProviders.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  list.innerHTML = dynProviders.map(p => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+      <div>
+        <span style="font-weight:600;font-size:13px">${escHtml(p.label||p.provider)}</span>
+        <code style="font-size:11px;color:var(--muted);margin-left:8px">${escHtml(p.provider)}</code>
+        <span class="badge ${p.loaded?'badge-green':p.key_set?'badge-yellow':'badge-muted'}" style="margin-left:6px">${p.loaded?'Loaded':p.key_set?'Key Set':'No Key'}</span>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${(p.models||[]).slice(0,5).join(', ')}${(p.models||[]).length>5?` +${p.models.length-5} more`:''}</div>
+      </div>
+      <button class="btn-ghost btn-sm" style="color:var(--red);flex-shrink:0" onclick="removeProvider('${escHtml(p.provider)}')">Remove</button>
+    </div>`).join('');
 }
 
 function quickProvTest(model) {

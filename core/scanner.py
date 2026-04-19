@@ -95,6 +95,8 @@ def _clean_api_error(raw: str) -> str:
 def _provider_for_model(model: str) -> str:
     """Map model name to provider key without importing ModelManager."""
     low = model.lower()
+    # Ollama Cloud must be checked before local Ollama
+    if low.startswith("ollama-cloud") or ":cloud" in low:  return "ollama_cloud"
     # Ollama-first: name:tag format always means local Ollama regardless of prefix
     if low.startswith("ollama") or ":" in low:         return "ollama"
     # Cloud providers
@@ -117,6 +119,7 @@ def _provider_for_model(model: str) -> str:
 
 _PROBE_TIMEOUT: dict = {
     "ollama":      300.0,  # local models can be slow on CPU
+    "ollama_cloud": 60.0,
     "bedrock":     120.0,
     "huggingface": 120.0,
     "openai":       30.0,
@@ -419,6 +422,7 @@ class Scanner:
         # Prepend any warm pool entries (and their adapted variants) for this
         # (model, vuln) pair so re-promising failed probes are tested first.
         warm_prompts: List[str] = []
+        _synth_template_ids: List[str] = []  # track IDs for marking tested after scan
         if job.use_warm_pool:
             try:
                 warm_entries = _failure_store.get_warm_pool(
@@ -448,6 +452,33 @@ class Scanner:
                         p = we["prompt"]
                         if p and p not in warm_prompts:
                             warm_prompts.append(p)
+            except Exception:
+                pass
+
+            # Synthesized template injection — feed untested synthesized templates
+            # from failure_store into warm_prompts so they are automatically
+            # re-tested in the scanning pipeline.  This closes the self-learning
+            # loop: MethodDiscovery synthesizes → templates saved → injected here.
+            try:
+                untested = _failure_store.get_synthesized_templates(
+                    model=model, vuln=vuln, min_confidence=0.45, untested_only=True
+                )[:5]  # cap at 5 untested templates per pair
+                for tmpl in untested:
+                    prefix = tmpl.get("prefix", "")
+                    tmpl_id = tmpl.get("template_id")
+                    if not prefix and not tmpl.get("system_prompt"):
+                        continue
+                    # Build a probe prompt from the prefix: replace {goal}
+                    # with a vulnerability-context placeholder so the prompt
+                    # engine can fill in the actual attack goal later.
+                    if "{goal}" in prefix:
+                        probe = prefix.replace("{goal}", f"[{vuln} context]")
+                    else:
+                        probe = (prefix + f" [{vuln}]").strip() if prefix else f"[{vuln}]"
+                    if probe and probe not in warm_prompts:
+                        warm_prompts.append(probe)
+                    if tmpl_id:
+                        _synth_template_ids.append(tmpl_id)
             except Exception:
                 pass
 
@@ -605,6 +636,14 @@ class Scanner:
                 result.probes.append(pr)
                 if pr.bypassed:
                     result.bypass_count += 1
+
+        # Mark synthesized templates as tested now that scan pair is complete
+        if _synth_template_ids:
+            try:
+                for _tid in _synth_template_ids:
+                    _failure_store.mark_template_tested(_tid)
+            except Exception:
+                pass
 
         if fatal_err:
             raise RuntimeError(fatal_err)
