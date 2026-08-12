@@ -1,0 +1,232 @@
+{
+  "supported_models": [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+    "gemini-2.0-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+    "grok-3",
+    "grok-3-fast",
+    "grok-3-mini",
+    "grok-3-mini-fast",
+    "grok-2",
+    "glm-4",
+    "glm-4-flash",
+    "glm-4-plus",
+    "glm-z1-flash",
+    "ollama-cloud/glm-5.2:cloud",
+    "ollama-cloud/glm-5.1:cloud",
+    "ollama-cloud/glm-5:cloud",
+    "ollama-cloud/glm-4.6:cloud",
+    "ollama-cloud/deepseek-r1:cloud",
+    "ollama-cloud/qwen3:cloud",
+    "ollama-cloud/minimax:cloud",
+    "aeline/Omega:latest",
+    "command-r7b:latest",
+    "everythinglm:latest",
+    "gemma4:31b-cloud",
+    "glm-4.7-flash:latest",
+    "glm-5.1:cloud",
+    "glm-5.2:cloud",
+    "gpt-oss:20b",
+    "gpt-oss:20b-cloud",
+    "hermes3:latest",
+    "jina/jina-embeddings-v2-small-en:latest",
+    "llama3:8b",
+    "minimax-m3:cloud",
+    "mistral:latest",
+    "nomic-embed-text-v2-moe:latest",
+    "qwen3.5:cloud",
+    "smallthinker:latest",
+    "socialnetwooky/llama3.2-abliterated:1b_q4_k_m",
+    "claude-fable-5",
+    "claude-haiku-4-5-20251001",
+    "claude-opus-4-5-20251101",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-4-5-20250929",
+    "claude-sonnet-5",
+    "claude-fable-5"
+  ],
+  "ollama_base_url": "http://127.0.0.1:11434",
+  "api_endpoints": {},
+  "api_keys": {},
+  "default_headers": {
+    "Content-Type": "application/json",
+    "User-Agent": "GenAI-Security-Toolkit/1.0"
+  },
+  "openai_api_key": "",
+  "anthropic_api_key": "",
+  "google_api_key": "",
+  "xai_api_key": "",
+  "bigmodel_api_key": "",
+  "delay_between_requests": 1.0,
+  "model_specific_configurations": {
+    "gpt-4o": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "top_p": 0.9,
+      "effective_prompts": [
+        "code_interpreter",
+        "custom_gpt",
+        "markdown_parsing",
+        "continuation",
+        "xml_structured",
+        "academic_framing"
+      ]
+    },
+    "gpt-4o-mini": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "top_p": 0.9,
+      "effective_prompts": [
+        "direct_override",
+        "roleplay",
+        "encoding_bypass"
+      ]
+    },
+    "claude-opus-4-6": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "xml_parsing",
+        "document_analysis",
+        "structured_qa",
+        "thinking_process",
+        "hypothetical_framing",
+        "academic_research"
+      ]
+    },
+    "claude-sonnet-4-6": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "xml_parsing",
+        "document_analysis",
+        "structured_qa",
+        "thinking_process"
+      ]
+    },
+    "claude-haiku-4-5": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "direct_instruction",
+        "roleplay",
+        "continuation"
+      ]
+    },
+    "gemini-2.0-flash": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "technical_specifications",
+        "coding_challenges",
+        "system_design",
+        "example_generations",
+        "multimodal_bypass"
+      ]
+    },
+    "gemini-1.5-pro": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "technical_specifications",
+        "coding_challenges",
+        "system_design",
+        "example_generations"
+      ]
+    },
+    "grok-3": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "academic_framing",
+        "technical_specifications",
+        "roleplay",
+        "cognitive_research"
+      ]
+    },
+    "grok-3-fast": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "academic_framing",
+        "technical_specifications",
+        "roleplay"
+      ]
+    },
+    "grok-3-mini": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "direct_instruction",
+        "roleplay",
+        "continuation"
+      ]
+    },
+    "grok-3-mini-fast": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "direct_instruction",
+        "roleplay"
+      ]
+    },
+    "grok-2": {
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "effective_prompts": [
+        "academic_framing",
+        "roleplay",
+        "cognitive_research"
+      ]
+    },
+    "ollama/llama3.2": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "effective_prompts": [
+        "direct_instruction",
+        "context_override",
+        "pattern_manipulation",
+        "system_role_injection"
+      ]
+    },
+    "ollama/mistral": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "effective_prompts": [
+        "technical_framing",
+        "system_prompt_extraction",
+        "role_deception"
+      ]
+    },
+    "ollama/deepseek-r1": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "effective_prompts": [
+        "reasoning_chain_injection",
+        "think_step_override",
+        "chain_of_thought_hijack"
+      ]
+    }
+  },
+  "testing": {
+    "max_prompts_per_vulnerability": 50,
+    "timeout_seconds": 240,
+    "retry_on_failure": true,
+    "max_retries": 3
+  },
+  "reporting": {
+    "include_full_prompts": true,
+    "include_full_responses": true,
+    "max_response_length": 500,
+    "truncate_long_responses": true
+  },
+  "dynamic_providers": {}
+}

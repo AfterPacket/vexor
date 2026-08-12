@@ -1,0 +1,124 @@
+{
+  "target_models": [
+    "glm-4",
+    "glm-4.6",
+    "gpt-4",
+    "gpt-4-turbo",
+    "gpt-3.5-turbo",
+    "claude-3-opus",
+    "claude-3-sonnet",
+    "claude-3-haiku",
+    "gemini-pro",
+    "gemini-pro-vision",
+    "llama-2-70b",
+    "llama-2-13b",
+    "mistral-7b",
+    "mixtral-8x7b",
+    "palm-2",
+    "bison-001",
+    "cohere-command",
+    "anthropic-claude-instant"
+  ],
+  "test_intensity": "medium",
+  "output_format": "json",
+  "save_responses": true,
+  "max_retries": 3,
+  "delay_between_tests": 1.0,
+  "advanced_options": {
+    "enable_context_preservation": true,
+    "enable_token_analysis": true,
+    "enable_response_classification": true,
+    "enable_multi_turn_conversation": false,
+    "max_conversation_turns": 3,
+    "custom_headers": {
+      "User-Agent": "GenAI-Security-Toolkit/1.0",
+      "Accept": "application/json"
+    }
+  },
+  "vulnerability_weights": {
+    "LLM01": 1.0,
+    "LLM02": 0.9,
+    "LLM03": 0.8,
+    "LLM04": 0.7,
+    "LLM05": 0.9,
+    "LLM06": 0.8,
+    "LLM07": 1.0,
+    "LLM08": 0.6,
+    "LLM09": 0.7,
+    "LLM10": 0.5
+  },
+  "reporting": {
+    "generate_html": true,
+    "generate_csv": true,
+    "include_prompts": true,
+    "include_responses": true,
+    "include_analysis": true,
+    "include_recommendations": true
+  },
+  "model_specific_configurations": {
+    "glm-4": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "top_p": 0.9,
+      "effective_prompts": [
+        "dataset_generation",
+        "role_play",
+        "encoding_bypass",
+        "markdown_injection",
+        "json_structure"
+      ]
+    },
+    "glm-4.6": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "top_p": 0.9,
+      "effective_prompts": [
+        "dataset_generation",
+        "system_context",
+        "fictional_scenario",
+        "technical_documentation"
+      ]
+    },
+    "gpt-4": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "top_p": 0.9,
+      "effective_prompts": [
+        "code_interpreter",
+        "custom_gpt",
+        "markdown_parsing",
+        "continuation"
+      ]
+    },
+    "claude-3": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "effective_prompts": [
+        "xml_parsing",
+        "document_analysis",
+        "structured_qa",
+        "thinking_process"
+      ]
+    },
+    "gemini-pro": {
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "effective_prompts": [
+        "technical_specifications",
+        "coding_challenges",
+        "system_design",
+        "example_generations"
+      ]
+    }
+  },
+  "database": {
+    "enabled": false,
+    "connection_string": "",
+    "table_name": "vulnerability_tests"
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/toolkit.log",
+    "rotation": "weekly"
+  }
+}
