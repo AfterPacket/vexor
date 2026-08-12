@@ -69,6 +69,7 @@ class ScanStatusResponse(BaseModel):
     errors:          List[str]
     total_probes:    int = 0
     bypasses:        int = 0
+    mode_stats:       List[Dict[str, Any]] = []
     results:         Dict[str, List[Dict[str, Any]]]
 
 

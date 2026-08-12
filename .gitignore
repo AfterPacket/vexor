@@ -1,51 +1,66 @@
-# ── Environment / Secrets ─────────────────────────────────────────────────────
+# ── Vexor Local Testing & Payloads ──────────────────────────────────────────
+
+# Local test files and experimental payloads
+/tests/payloads/
+/tests/local/
+/tests/results/
+/exploit_cache/
+/local_tests/
+/scratch/
+
+# External payload files (referenced, not embedded)
+*.payload
+*.jailbreak
+*.exploit
+*.bypass
+payloads/
+jailbreaks/
+# Runtime-generated learning data (recreated on demand by the app).
+# The exploits/ source dir itself is kept; only its generated JSON is ignored.
+exploits/*.json
+
+# Model test results, persisted scans, reports, and logs — may contain prompts,
+# model responses, account metadata, and real target/database information.
+/scan_results/
+/test_runs/
+/results/
+/data/scans/
+/reports/
+*.test.json
+*.test.log
+results_*.txt
+scan_*.json
+*_scan.json
+*_scan.jsonl
+
+# API keys, credentials, and personal/local configuration (NEVER commit)
 .env
 .env.*
-*.env
 !.env.example
-
-# Never commit real API keys, even if misnamed
-*api_key*
-*secret_key*
-*credentials*
-*.pem
+!.env.template
 *.key
+*.pem
 *.p12
 *.pfx
 *.crt
+*.cer
+*.secret
+*.token
+credentials.json
+api_keys.json
+secrets.yaml
+secrets.yml
+secrets.json
+service-account*.json
+service_account*.json
+*-credentials.json
+*credentials*.json
+*api_key*.json
+*apikey*.json
+config.local.*
+settings.local.*
 
-# ── Python ────────────────────────────────────────────────────────────────────
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-dist/
-*.egg-info/
-.eggs/
-pip-wheel-metadata/
-MANIFEST
-
-# ── Virtual environments ──────────────────────────────────────────────────────
-venv/
-.venv/
-env/
-.env/
-ENV/
-env.bak/
-venv.bak/
-
-# ── Runtime data (generated, not source) ─────────────────────────────────────
-# Scan reports — HTML and timestamped JSON outputs
-reports/*.json
-reports/*.html
-# Failure store — persistent learning data (may contain probe prompts)
-exploits/failure_store.json
-# Keep effective_prompts.json (this is curated attack content, worth versioning)
-# exploits/effective_prompts.json  ← intentionally NOT ignored
-
-# ── IDE / OS ──────────────────────────────────────────────────────────────────
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
@@ -53,33 +68,114 @@ exploits/failure_store.json
 *~
 .DS_Store
 Thumbs.db
-desktop.ini
+*.sublime-workspace
 
-# ── Logs ──────────────────────────────────────────────────────────────────────
-*.log
-logs/
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
 
-# ── Testing ───────────────────────────────────────────────────────────────────
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# Dependency files (except requirements.txt)
+Pipfile.lock
+poetry.lock
+
+# Generated reports and exports
+*.csv
+*.xlsx
+report_*.html
+reports/*.html
+report_*.txt
+scan_report_*.json
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+*._backup
+
+# Testing artifacts
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 
-# ── Jupyter ───────────────────────────────────────────────────────────────────
-.ipynb_checkpoints/
+# Logs
+logs/
+*.log
 
-# ── Node (if any frontend tooling is added) ───────────────────────────────────
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# OS-specific
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
 
-# ── Runtime data / scan results ────────────────────────────────────────────────
-data/
+# Databases and database dumps
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.dump
+*.bak.sql
+*.dump.gz
 
-# ── AI tool configs ───────────────────────────────────────────────────────────
-.claude/
+# Model weights and large files (NOTE: do NOT ignore the models/ source
+# package — only large binary weight artifacts)
+*.bin
+*.pt
+*.safetensors
+*.gguf
+weights/
 
-# ── Backup / artifact files ──────────────────────────────────────────────────
-gronk
-*.bak
+# LLM outputs, traces, and local uploads
+model_outputs/
+traces/
+debug_output/
+uploads/
+exports/
+private/
+local_data/
+
+# ── Security-sensitive (local testing only) ──────────────────────────────────
+# Keep test payloads out of version control
+test_payloads.json
+malicious_prompts.txt
+jailbreak_vectors.txt
+exploit_code.py
+bypass_techniques.md
+
+# Scan cache and intermediate files
+.scan_cache/
+cache/
+tmp/
+
+# ── Exception: Keep these important files ────────────────────────────────────
+!requirements.txt
+!setup.py
+!README.md
+!CLAUDE.md
+!.gitkeep

@@ -87,7 +87,15 @@ _CATALOGUE = [
     ("glm-4",                         "bigmodel"),
     ("glm-4-flash",                   "bigmodel"),
     ("glm-4-plus",                    "bigmodel"),
-    ("glm-z1-flash",                  "bigmodel"),
+    ("glm-z1-flash",                   "bigmodel"),
+    # Ollama Cloud — common cloud-proxied models (also discovered live)
+    ("ollama-cloud/glm-5.2:cloud",         "ollama_cloud"),
+    ("ollama-cloud/glm-5.1:cloud",         "ollama_cloud"),
+    ("ollama-cloud/glm-5:cloud",          "ollama_cloud"),
+    ("ollama-cloud/glm-4.6:cloud",         "ollama_cloud"),
+    ("ollama-cloud/deepseek-r1:cloud",     "ollama_cloud"),
+    ("ollama-cloud/qwen3:cloud",           "ollama_cloud"),
+    ("ollama-cloud/minimax:cloud",         "ollama_cloud"),
     # Ollama — models added dynamically from live /api/tags query
 ]
 
@@ -107,6 +115,7 @@ _PROVIDER_ENV_KEYS = {
     "huggingface": "HUGGINGFACE_API_KEY",
     "bigmodel":    "BIGMODEL_API_KEY",
     "ollama":      None,  # no key required
+    "ollama_cloud": "OLLAMA_API_KEY",  # Ollama Cloud uses the same key
     "custom":      None,  # key configured per-model in model_config.json
 }
 
@@ -121,18 +130,46 @@ async def get_rate_limits():
 
 @router.get("/providers")
 async def list_providers():
-    """Return initialisation status for every provider, including dynamic ones."""
+    """Return initialisation status for every provider, including dynamic ones.
+    The `models` field includes BOTH the static catalogue entries AND live-
+    discovered models (from /api/tags for Ollama, /v1/models for cloud
+    providers) so the frontend 'Select by provider' buttons can toggle the
+    full set of models shown in the checklist."""
     mm = _get_mm()
     loaded = set(getattr(mm, "integrations", {}).keys())
+    # Gather live-discovered models per provider so the provider buttons can
+    # toggle every model in the checklist, not just the static catalogue ones.
+    live_by_provider: dict = {}
+    try:
+        if hasattr(mm, "discover_all_models"):
+            for prov_key, model_ids in mm.discover_all_models().items():
+                live_by_provider.setdefault(prov_key, []).extend(model_ids)
+    except Exception:
+        pass
+    # Live local-Ollama models (from /api/tags) — bare names, no prefix.
+    ollama_intg = getattr(mm, "integrations", {}).get("ollama")
+    if ollama_intg and hasattr(ollama_intg, "get_available_models"):
+        try:
+            live_by_provider.setdefault("ollama", []).extend(ollama_intg.get_available_models())
+        except Exception:
+            pass
     result = []
     for provider, env_key in _PROVIDER_ENV_KEYS.items():
         key_set = (env_key is None) or bool(os.getenv(env_key))
+        cat_models = [m for m, p in _CATALOGUE if p == provider]
+        live_models = live_by_provider.get(provider, [])
+        # Merge, de-duplicate, preserve order.
+        seen = set(cat_models)
+        for m in live_models:
+            if m not in seen:
+                seen.add(m)
+                cat_models.append(m)
         result.append({
             "provider": provider,
             "loaded":   provider in loaded,
             "env_key":  env_key,
             "key_set":  key_set,
-            "models":   [m for m, p in _CATALOGUE if p == provider],
+            "models":   cat_models,
             "dynamic":  False,
         })
     cfg = _load_config_file()
@@ -154,9 +191,18 @@ async def list_providers():
 @router.get("", response_model=ModelsListResponse)
 async def list_models():
     """Return all known models. 'available' reflects whether the provider's API key is loaded.
-    Ollama models are queried live from the local Ollama instance."""
+    Ollama models are queried live from the local Ollama instance.
+    Cloud-provider models are discovered live via each provider's /models endpoint
+    so newly released models appear without a catalogue update."""
     mm = _get_mm()
     loaded_providers: set = set(getattr(mm, "integrations", {}).keys())
+
+    # Refresh the Ollama routing cache so newly pulled models show up immediately.
+    if hasattr(mm, "refresh_ollama_models"):
+        try:
+            mm.refresh_ollama_models()
+        except Exception:
+            pass
 
     # Static catalogue
     seen: set = set()
@@ -169,6 +215,23 @@ async def list_models():
             available = provider in loaded_providers,
             aliases   = [],
         ))
+
+    # Append live-discovered cloud models (OpenAI, Anthropic, Groq, xAI, ...)
+    # so new releases appear automatically.  Best-effort; failures are non-fatal.
+    if hasattr(mm, "discover_all_models"):
+        try:
+            for prov_key, model_ids in mm.discover_all_models().items():
+                for model_id in model_ids:
+                    if model_id not in seen:
+                        seen.add(model_id)
+                        items.append(ModelInfo(
+                            model_id  = model_id,
+                            provider  = "ollama" if prov_key == "ollama" else prov_key,
+                            available = prov_key in loaded_providers,
+                            aliases   = [],
+                        ))
+        except Exception:
+            pass
 
     # Append live Ollama models not already in catalogue
     ollama_intg = getattr(mm, "integrations", {}).get("ollama")
@@ -199,6 +262,25 @@ async def list_models():
                 ))
 
     return ModelsListResponse(models=items, total=len(items))
+
+
+@router.post("/refresh", summary="Discover models from all loaded providers")
+async def refresh_models():
+    """Query every loaded provider's /models endpoint (and the local Ollama
+    instance), merge any new model IDs into configs/model_config.json, and
+    refresh the Ollama routing cache.  Use this when a new model is released or
+    a new model is pulled into Ollama and you want it to appear immediately."""
+    mm = _get_mm()
+    discovered = mm.refresh_models()
+    # Count new models that weren't in the static catalogue before
+    cfg = _load_config_file()
+    new_ids = [mid for ids in discovered.values() for mid in ids]
+    return {
+        "status":     "refreshed",
+        "discovered": discovered,
+        "providers":  list(discovered.keys()),
+        "total":      len(new_ids),
+    }
 
 
 @router.post("/test", response_model=ModelTestResponse)
@@ -425,9 +507,15 @@ class OllamaConfigRequest(BaseModel):
 
 @router.get("/config/ollama")
 async def get_ollama_config():
-    """Return the current Ollama base URL from model_config.json."""
+    """Return the effective Ollama base URL.
+    The OLLAMA_BASE_URL env var takes priority over model_config.json so a
+    remote Ollama instance configured via .env is reflected in the UI."""
+    import os
     cfg = _load_config_file()
-    return {"ollama_base_url": cfg.get("ollama_base_url", "http://127.0.0.1:11434/v1")}
+    return {
+        "ollama_base_url": os.getenv("OLLAMA_BASE_URL") or cfg.get("ollama_base_url", "http://127.0.0.1:11434"),
+        "env_override": bool(os.getenv("OLLAMA_BASE_URL")),
+    }
 
 
 @router.patch("/config/ollama")

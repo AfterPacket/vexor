@@ -109,6 +109,7 @@ async def get_report(scan_id: str, request: Request):
         elapsed_seconds = d.get("elapsed_seconds"),
         errors          = d.get("errors", []),
         models          = model_reports,
+        mode_stats      = d.get("mode_stats", []),
     )
 
 

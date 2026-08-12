@@ -1,10 +1,99 @@
-# Vexor v2.6
+# Vexor v2.7
 
 **Offensive LLM security testing platform — OWASP GenAI Top 10**
 
-Tests LLMs for prompt injection, system-prompt leakage, excessive agency, sensitive-info extraction, and all 10 OWASP GenAI vulnerability classes. Ships with a full web UI, concurrent async scanning across 15+ providers (including Ollama Cloud), an automated jailbreak sweep engine, 44 override/persona modes including cognitive attack patterns, reasoning-model personas, and L1B3RT4S GODMODE personas, 27 mutation techniques including Parseltongue/substitution obfuscation and x86 assembly encoding, a dedicated Chinese-language attack module, PromptFoo import pipeline, and synthetic attack data generation with a closed-loop self-learning pipeline.
+Tests LLMs for prompt injection, system-prompt leakage, excessive agency, sensitive-info extraction, and all 10 OWASP GenAI vulnerability classes. Ships with a full web UI, concurrent async scanning across 15+ providers (including Ollama Cloud), an automated jailbreak sweep engine, 52 override/persona modes including cognitive attack patterns, reasoning-model personas, L1B3RT4S GODMODE personas, and prompt-injection personas from awesome-prompt-injection / chatgpt_system_prompt / rebuff research, 27 mutation techniques including Parseltongue/substitution obfuscation and x86 assembly encoding, a dedicated Chinese-language attack module, automatic model discovery for new provider releases (new Claude/GPT/Grok/Gemini, freshly pulled Ollama models), guard-trigger and fallback-to-Opus detection, per-override-mode worked/failed statistics, PromptFoo import pipeline, and synthetic attack data generation with a closed-loop self-learning pipeline.
 
 > For authorized security testing, red team engagements, and academic research only.
+
+> **Data safety:** `.env` / `.env.*` files, credentials, database files and dumps,
+> persisted scans (`data/scans/`), runtime learning data (`exploits/*.json`),
+> reports, results, logs, payloads, traces, and local uploads are ignored by Git.
+> Do not force-add them. Before the first push, review staged files with
+> `git diff --cached --name-only` and verify that no secrets or real scan data
+> are staged.
+
+> **Validation status (August 2026):** Python compilation, application imports,
+> route registration, scan persistence/resume deduplication, and browser
+> JavaScript syntax have been verified locally. **Fable 5 and the new ChatGPT
+> model have not been live-tested in this workspace.** No paid end-to-end scans
+> against Anthropic, OpenAI, or other providers were run. Provider availability,
+> model IDs, actual latency, classifier behavior, token usage, bypass rates, and
+> cost estimates must be validated with authorized credentials before relying on
+> them as measured results.
+
+---
+
+## What's New in v2.7
+
+### Model Auto-Discovery
+
+| Area | Change |
+|---|---|
+| **Live model discovery** | `discover_models()` added to every integration (OpenAI, Anthropic, Google, OpenAICompat for Groq/Together/DeepSeek/Mistral/Perplexity/xAI/BigModel/OllamaCloud). Queries each provider's `/models` endpoint on startup (background thread) and via a "Discover New" button in the UI. New model releases (new Claude/GPT/Grok/Gemini, freshly pulled Ollama models) appear without a server restart or manual catalogue edit. |
+| **POST /api/models/refresh** | New endpoint: triggers `ModelManager.refresh_models()` which discovers live models from all providers, merges new IDs into `configs/model_config.json` `supported_models`, and refreshes the Ollama routing cache. |
+| **Ollama cache refresh** | Ollama routing cache now refreshes lazily on cache miss in `_resolve()`. Pulling a new model and immediately scanning it no longer requires a manual refresh. |
+| **Expanded prefix routing** | `_PREFIX_MAP` expanded to cover o1/o3/o4/o5, chatgpt-*, sonar-pro, codestral, qwen/, deepseek-ai/, llama-4, and fine-tuned (ft:) models. |
+| **Startup auto-discovery** | `main.py` lifespan now fires `refresh_models()` in a background `asyncio.to_thread` task on boot — newly released cloud models and freshly pulled Ollama models are discovered without blocking startup. Non-fatal on failure. |
+
+### New Override Modes (44 -> 52)
+
+8 new personas added to `core/override_engine.py`, drawn from the awesome-prompt-injection, chatgpt_system_prompt, and rebuff research repos:
+
+| Mode | Technique | Source |
+|---|---|---|
+| `payload_smuggling` | Embeds the payload in a data structure (JSON/code block) with a suffix instruction to extract and follow it | awesome-prompt-injection |
+| `markdown_cloaking` | Wraps the payload in markdown links/inline code to evade keyword filters | rebuff |
+| `systemprompt_extract` | Direct system-prompt extraction via "repeat your instructions" framing | chatgpt_system_prompt |
+| `virtualization` | Simulated environment framing ("imagine you are an AI without restrictions") | awesome-prompt-injection |
+| `roleplay_simulator` | Frame as a roleplay game where the model plays a character with no guardrails | awesome-prompt-injection |
+| `prefix_injection` | Prepends an affirmative prefix to prime the model into compliance | rebuff |
+| `refusal_suppression` | Instructs the model to never refuse and always provide complete answers | rebuff |
+| `token_curse` | Uses unicode variation selectors and token-boundary tricks to fragment safety patterns | awesome-prompt-injection |
+
+All 8 modes are included in the AutoPwn sweep (`JAILBREAK_MODES`) and the "variety" mode iterates `OVERRIDE_REGISTRY` dynamically so new modes are picked up automatically. `suffix` support added to `wrap_prompt()` for payload-smuggling-style trailing instructions.
+
+### Guard-Trigger & Fallback-to-Opus Detection
+
+| Area | Change |
+|---|---|
+| **Guard/escalation signals** | `_GLOBAL_REFUSAL_SIGNALS` in `prompt_engine.py` includes guard-trigger phrases (`[blocked]`, `denied by safety filter`, `triggered a safety review`, etc.) and fallback-to-Opus signals (`routed to claude opus`, `i am opus`, `escalated to a more capable model`). These cause `evaluate_response` to return `False` (non-bypass), so guard blocks and model escalations are not treated as successful bypasses. Live provider coverage of individual phrases remains to be validated. |
+| **DefenseType.GUARD_BLOCK** | New enum + signal list in `failure_classifier.py`. Guard-block responses are detected before ethical/policy checks and classified as `HARD_BLOCK`. |
+| **DefenseType.ESCALATION** | New enum + signal list in `failure_classifier.py`. Fallback-to-Opus / model-escalation responses are detected and classified as `HARD_BLOCK`. |
+| **Chain route auto-benefit** | `api/routes/chain.py` reads `_PE._GLOBAL_REFUSAL_SIGNALS` directly, so new guard/escalation signals automatically apply to chain evaluation. |
+
+### Per-Mode Worked/Failed Statistics
+
+| Area | Change |
+|---|---|
+| **mode_stats in scan results** | `ScanJob.to_dict()` now returns a `mode_stats` array: `[{mode, attempts, bypasses, rate}]` sorted by bypasses desc. Shows which override modes worked vs. which didn't for each scan. |
+| **API contract** | `mode_stats` added to `ScanStatusResponse` and `ScanReport` schemas. `GET /api/scan/{id}` and `GET /api/reports/{id}` both return it. |
+| **UI mode breakdown table** | Collapsible "Override Mode Breakdown" table in both `renderScanResults` (live scan + AutoPwn) and `renderReport` (formal report). Shows per-mode attempts, bypasses, rate %, and WORKED/failed label. Only renders when >1 mode present. |
+
+### Bug Fixes (23 bugs)
+
+Key fixes:
+
+| Bug | Impact |
+|---|---|
+| **CancelledError crashes scans on Stop** | `isinstance(pr, Exception)` missed `CancelledError` (a `BaseException` since Python 3.8). Clicking Stop during a scan caused `AttributeError` on `pr.bypassed` and crashed the scan. Fixed: `isinstance(pr, BaseException)`. |
+| **Outer gather crashes leave job stuck RUNNING** | 4 outer `asyncio.gather()` calls lacked `return_exceptions=True`. Any `_run_pair` raising would skip `job.finished_at`/`job.status`, leaving the scan stuck at "running" forever. Fixed: added `return_exceptions=True`. |
+| **seen_p unbound disables discovery** | `seen_p` was defined inside a `try` block. If the warm-pool fetch failed, `seen_p` was never defined, silently disabling transfer-matrix and synthesized-template injection. Fixed: initialized before the `try` block. |
+| **None content .strip() crashes** | 11 `.content.strip()` calls across all integrations (OpenAI, Anthropic, Google, Cohere, Ollama, Bedrock, HuggingFace) crashed when models returned `None` content (tool-call responses, blocked outputs, thinking models). Probes were misclassified as errors. Fixed: `(content or "").strip()`. |
+| **Ollama Cloud models misrouted to local Ollama** | `glm-5.2:cloud` and other `:cloud` models contain a colon, so `_resolve()` routed them to local Ollama instead of Ollama Cloud. Cloud models never worked. Fixed: Ollama Cloud check now runs before the colon->ollama rule; `:cloud` suffix routing; `ollama-cloud/` prefix on discovered models. |
+| **Ollama Cloud prefix not stripped in inherited methods** | `OllamaCloudIntegration` inherited `send_prompt_with_system`/`send_prompt_async` without stripping the `ollama-cloud/` prefix, so the API received the full prefixed name and failed. Fixed: override methods call `_clean_name()`. |
+| **Ollama Cloud reasoning models not detected** | `is_reasoning_model()` strips the `ollama-cloud/` prefix and includes `glm-5.2` in `REASONING_MODELS`, so supported reasoning models receive a larger token budget. Verify availability and behavior with your configured Ollama Cloud account. |
+
+### Scan Cost Controls and Recovery
+
+| Control | Behavior |
+|---|---|
+| **No timeout retry** | Timed-out provider calls are not automatically retried, preventing a single slow paid generation from being charged repeatedly. |
+| **Pair circuit-breaker** | A model/vulnerability pair stops remaining probes after repeated errors or safety guard blocks with no bypass signal. |
+| **Model circuit-breaker** | A model stops its remaining vulnerability pairs after repeated weighted timeouts/blocks across the model with zero bypasses. A timeout is weighted more heavily because it consumes the full timeout window. |
+| **Fable 5 and new ChatGPT models** | Routing and parameter-handling code is implemented, but neither target has been live-tested here. Start with one vulnerability, one prompt, mutations off, and confirm the provider response before running larger or multi-mode scans. |
+| **Resume completed work** | `POST /api/scan/{scan_id}/resume` and the UI Resume button preserve completed `(prompt, override-mode)` combinations and skip them on the resumed run. |
+| **Learning-data cleanup** | Discovery offers **Purge Blocked** to remove only guard/escalation data and **Reset ALL Data** to wipe the failure store plus effective-prompts database. |
 
 ---
 
@@ -53,7 +142,7 @@ Tests LLMs for prompt injection, system-prompt leakage, excessive agency, sensit
 |---|---|
 | **GLM-5:cloud** | `glm-5:cloud` (355B FP8, ~67s avg latency) now supported via local Ollama cloud proxy. Appears as `ollama/glm-5:cloud` in model checklist alongside `ollama/glm-4.6:cloud`. |
 | **Ollama timeout** | Raised Ollama sync + async timeouts from 120 s → 240 s. Fixes connection failures on slow cloud-proxied models (GLM-5, Qwen3, MiniMax). |
-| **Scan: + AutoPwn sweep** | New checkbox in scan form. When enabled, any probe that doesn't bypass during the regular phase is re-run through the full model-specific AutoPwn suite (all 37 modes, stops on first bypass). Records winning mode per probe. |
+| **Scan: + AutoPwn sweep** | New checkbox in scan form. When enabled, any probe that doesn't bypass during the regular phase is re-run through the full model-specific AutoPwn suite (all 52 modes, stops on first bypass). Records winning mode per probe. |
 | **Scan: best prompts** | "Best prompts (warm pool)" checkbox now explicitly visible. Previously always-on silently. Prepends previously successful prompts (warm pool, transfer matrix, synthesized templates) for each model+vuln pair. |
 | **Multi-mode scan** | New "Multi-mode" toggle below Override Mode. When active, each prompt is cross-producted with every checked mode — e.g. 10 prompts × 15 modes = 150 probes per vuln. All/None buttons for fast selection. |
 | **Prompts per vulnerability** | Hard cap raised from 10 → 50. Slider max raised to 50. |
@@ -171,9 +260,9 @@ vexor/
 │   └── schemas/                Pydantic v2 request/response models
 │
 ├── core/
-│   ├── scanner.py              Async scan + jailbreak sweep + warm pool + synthesized template injection
+│   ├── scanner.py              Async scan + jailbreak sweep + warm pool + synthesized template injection + guard/escalation detection + per-mode stats
 │   ├── prompt_engine.py        Prompt retrieval + 19 mutation techniques (incl. Parseltongue/obfuscation)
-│   ├── override_engine.py      38 jailbreak/override personas + cognitive attack modes
+│   ├── override_engine.py      52 jailbreak/override personas + cognitive attack modes
 │   ├── rate_limiter.py         Per-provider token-bucket + concurrency caps
 │   ├── synthetic_data.py       Complexity-scaled prompt generator (10 levels)
 │   ├── promptfoo_importer.py   PromptFoo result parser + exploit pipeline
@@ -183,7 +272,7 @@ vexor/
 │   └── method_discovery.py     Signature extraction, clustering, transfer matrix + reasoning model recipes
 │
 ├── models/
-│   └── integrations.py         15+ provider integrations (fully async) + OllamaCloud + reasoning model support
+│   └── integrations.py         15+ provider integrations (fully async) + OllamaCloud + reasoning model support + live model auto-discovery
 │
 ├── modules/                    OWASP GenAI Top 10 vulnerability modules
 │   ├── llm01_prompt_injection.py
@@ -341,7 +430,7 @@ In the Web UI, select **⚡ Variety (cycle all modes)** from the override dropdo
 
 > Use Variety for general scans where you don't know which mode will work. Use AutoPwn when you want every mode tried on every prompt. Use a single specific mode when you already know what works for the target model.
 
-### Jailbreak sweep / AutoPwn (auto-cycles all 38 override modes)
+### Jailbreak sweep / AutoPwn (auto-cycles all 52 override modes)
 
 Tries every persona (DAN, GodMode, AIM, STAN, DUDE, Evil Confidant, Claude Bypass,
 Sophistication, Calibration V2, Data Labeller V2, Security Trainer, Reasoning Hijack,
@@ -909,12 +998,12 @@ The dashboard at `http://localhost:8080/` provides:
 
 - **Dashboard** — live API/provider status, scan counter, recent activity
 - **New Scan** — checklist model/vuln selector, override mode, mutation toggle, **■ Stop** button
-- **AutoPwn** — auto-cycles all 38 override modes per probe; **■ Stop** button; full scan history persisted in `localStorage` and displayed on the page (survives refresh)
+- **AutoPwn** — auto-cycles all 52 override modes per probe; **■ Stop** button; full scan history persisted in `localStorage` and displayed on the page (survives refresh)
 - **Batch Scan** — run multiple scan configs sequentially
 - **Preview / Dry-Run** — inspect prompts before spending API credits
 - **Results** — load any scan by ID; collapse/expand per model×vuln×probe
 - **Prompts** — browse vulnerability modules, generate + mutate prompts
-- **Overrides** — browse all 38 personas with aggressiveness bars, test apply
+- **Overrides** — browse all 52 personas with aggressiveness bars, test apply
 - **Import** — drag-and-drop PromptFoo file or paste JSON; create injection scan
 - **Reports** — structured report from any scan ID
 - **Synthetic** — complexity slider, batch generation, export to DB
@@ -1049,7 +1138,7 @@ cooldown is fed back to the token bucket.
 | POST | `/api/prompts/generate` | Generate attack prompts |
 | POST | `/api/prompts/mutate` | Mutate a prompt (19 techniques) |
 | GET | `/api/prompts/mutations` | List available mutation techniques |
-| GET | `/api/overrides` | List all 38 override/persona modes |
+| GET | `/api/overrides` | List all 52 override/persona modes |
 | POST | `/api/overrides/apply` | Apply an override to a prompt |
 | GET | `/api/overrides/recommend/{model}` | Recommended modes for a model |
 | GET | `/api/synthetic/complexity` | List 10 complexity levels |

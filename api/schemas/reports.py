@@ -27,4 +27,5 @@ class ScanReport(BaseModel):
     elapsed_seconds: Optional[float]
     errors:          List[str]
     models:          List[ModelReport]
+    mode_stats:      List[Dict[str, Any]] = []
     raw:             Optional[Dict[str, Any]] = None

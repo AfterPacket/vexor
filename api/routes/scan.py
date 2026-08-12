@@ -10,6 +10,7 @@ POST /api/scan/preview     -- dry-run (no LLM calls)
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -108,6 +109,7 @@ def _scan_to_json(job: ScanJob) -> dict:
         "models":            job.models,
         "vulnerabilities":   job.vulnerabilities,
         "override_mode":     job.override_mode,
+        "override_modes":    job.override_modes,
         "prompt_count":      job.prompt_count,
         "use_mutations":     job.use_mutations,
         "started_at":        job.started_at,
@@ -159,6 +161,7 @@ def _json_to_scan(data: dict) -> ScanJob:
         models            = data["models"],
         vulnerabilities   = data["vulnerabilities"],
         override_mode     = data["override_mode"],
+        override_modes    = data.get("override_modes"),
         prompt_count      = data.get("prompt_count", 5),
         use_mutations     = data.get("use_mutations", False),
         results           = results,
@@ -182,6 +185,26 @@ def save_scan_to_disk(job: ScanJob) -> None:
         print(f"[!] save_scan_to_disk failed for {job.scan_id}: {exc}")
 
 
+def _reconcile_zombie(job: ScanJob) -> bool:
+    """
+    A scan persisted while RUNNING/PENDING can never resume -- the asyncio
+    task that drove it died with the old process. Flip it to a terminal state
+    so the UI doesn't show a phantom "running" scan forever.
+
+    Returns True if the job's status was changed.
+    """
+    if job.status not in (ScanStatus.RUNNING, ScanStatus.PENDING):
+        return False
+    if job.cancelled:
+        job.status = ScanStatus.CANCELLED
+    else:
+        job.status = ScanStatus.FAILED
+        job.errors.append("Scan interrupted by server restart")
+    if not job.finished_at:
+        job.finished_at = time.time()
+    return True
+
+
 def load_all_scans_from_disk(store: dict) -> int:
     """
     Load all persisted scan JSON files from SCAN_PERSIST_DIR into *store*.
@@ -193,8 +216,22 @@ def load_all_scans_from_disk(store: dict) -> int:
     loaded = 0
     for path in SCAN_PERSIST_DIR.glob("*.json"):
         try:
+            # A scan already in the store is owned by this process and may be
+            # actively running.  Never replace it with a stale disk copy and
+            # never zombie-reconcile it -- its driving task is alive right here,
+            # so the "running" status on disk is current, not orphaned.
+            # Checking the filename first also avoids re-parsing large result
+            # files on every /history poll.
+            if path.stem in store:
+                continue
             data = json.loads(path.read_text(encoding="utf-8"))
             job  = _json_to_scan(data)
+            if _reconcile_zombie(job):
+                # rewrite the file so the zombie stays resolved on future restarts
+                try:
+                    path.write_text(json.dumps(_scan_to_json(job), indent=2), encoding="utf-8")
+                except Exception:
+                    pass
             store[job.scan_id] = job
             loaded += 1
         except Exception as exc:
@@ -222,6 +259,11 @@ def _get_job(scan_id: str, store: dict) -> "ScanJob | None":
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             job  = _json_to_scan(data)
+            if _reconcile_zombie(job):
+                try:
+                    path.write_text(json.dumps(_scan_to_json(job), indent=2), encoding="utf-8")
+                except Exception:
+                    pass
             store[scan_id] = job  # cache back into memory
             return job
         except Exception:
@@ -233,17 +275,23 @@ async def _run_job(scan_id: str, store: dict):
     import asyncio as _asyncio
     job = store.get(scan_id)
     if job is None:
+        print(f"[!] _run_job: Scan {scan_id} not found in store")
         return
 
     MAX_SCAN_SECONDS = 7200  # 2-hour hard cap — no scan should run longer than this
 
+    print(f"[*] Scan {scan_id[:8]}... starting: {len(job.models)} model(s) × {len(job.vulnerabilities)} vuln(s)")
+
     # Wrap run_scan in a Task so cancel_scan can cancel the entire tree
     # (asyncio.gather inside run_scan will cascade-cancel all pair/probe tasks).
+    # Note: run_scan is async and runs in the event loop (not a thread)
     scan_task = _asyncio.ensure_future(_scanner.run_scan(job))
     job.active_tasks.add(scan_task)
     try:
-        await _asyncio.wait_for(_asyncio.shield(scan_task), timeout=MAX_SCAN_SECONDS)
+        # Use wait_for with shield to enforce hard timeout without cancelling immediately
+        await _asyncio.wait_for(scan_task, timeout=MAX_SCAN_SECONDS)
     except _asyncio.TimeoutError:
+        print(f"[!] Scan {scan_id[:8]}... timed out after {MAX_SCAN_SECONDS}s")
         scan_task.cancel()
         try:
             await scan_task
@@ -255,9 +303,18 @@ async def _run_job(scan_id: str, store: dict):
             job.finished_at  = __import__("time").time()
             job.errors.append("Scan exceeded 2-hour maximum duration and was force-stopped")
     except _asyncio.CancelledError:
+        print(f"[*] Scan {scan_id[:8]}... was cancelled")
         pass
+    except Exception as e:
+        print(f"[!] Scan {scan_id[:8]}... failed with exception: {e}")
+        job.errors.append(f"Scan execution error: {e}")
+        if job.status == ScanStatus.RUNNING:
+            job.status = ScanStatus.FAILED
+            job.finished_at = time.time()
     finally:
         job.active_tasks.discard(scan_task)
+
+    print(f"[*] Scan {scan_id[:8]}... finished with status {job.status.value if hasattr(job.status, 'value') else job.status}")
 
     # Persist completed and failed scans so they survive restarts
     if job.status in (ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED):
@@ -272,6 +329,15 @@ async def start_scan(
     request: Request,
 ):
     store = _get_store(request)
+
+    # Validate input
+    if not req.models or len(req.models) == 0:
+        raise HTTPException(status_code=400, detail="At least one model must be selected")
+    if not req.vulnerabilities or len(req.vulnerabilities) == 0:
+        raise HTTPException(status_code=400, detail="At least one vulnerability must be selected")
+
+    print(f"[*] start_scan: Creating scan with models={req.models}, vulns={req.vulnerabilities}")
+
     extra = _extract_chain_prompts(req.vulnerabilities or [])
     job   = _scanner.create_scan_job(
         models           = req.models,
@@ -285,6 +351,7 @@ async def start_scan(
         use_warm_pool    = req.use_warm_pool,
     )
     store[job.scan_id] = job
+    print(f"[*] start_scan: Queuing _run_job for scan {job.scan_id[:8]}...")
     background_tasks.add_task(_run_job, job.scan_id, store)
     chain_count = sum(len(v) for v in extra.values())
     return ScanResponse(
@@ -293,6 +360,74 @@ async def start_scan(
         message = f"Scan queued — {len(req.models)} model(s) × {len(req.vulnerabilities or [])} vuln(s), +{chain_count} chain prompts",
     )
 
+
+@router.post("/{scan_id}/resume", response_model=ScanResponse, status_code=202)
+async def resume_scan(
+    scan_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+):
+    """
+    Resume an interrupted scan (FAILED / CANCELLED / server-restart zombie).
+
+    Already-completed (prompt, override_mode) probes are preserved and skipped,
+    so resuming never re-charges the provider for work already done — it only
+    runs the remaining probes.
+    """
+    store = _get_store(request)
+    job   = _get_job(scan_id, store)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
+    if job.status == ScanStatus.RUNNING:
+        raise HTTPException(status_code=409, detail="Scan is already running")
+    if job.status == ScanStatus.COMPLETED:
+        return ScanResponse(
+            scan_id=scan_id, status="completed",
+            message="Scan already completed — nothing to resume",
+        )
+
+    # Reset to a runnable state; run_scan + _scan_pair skip finished probes.
+    job.status      = ScanStatus.PENDING
+    job.cancelled   = False
+    job.finished_at = None
+    store[scan_id]  = job
+
+    completed = sum(
+        len(vr.probes) for vr_list in job.results.values() for vr in vr_list
+    )
+    print(f"[*] resume_scan: Resuming {scan_id[:8]}... ({completed} probe(s) already done)")
+    background_tasks.add_task(_run_job, scan_id, store)
+    return ScanResponse(
+        scan_id = scan_id,
+        status  = "pending",
+        message = f"Scan resumed — {completed} completed probe(s) preserved, running the rest",
+    )
+
+
+# ── Scan history (persisted + in-memory) ─────────────────────────────────────
+
+@router.get("/history")
+async def list_scan_history(request: Request):
+    """Return all scans: in-memory store + any persisted on disk not yet loaded."""
+    store = _get_store(request)
+    # Load any disk scans not yet in memory
+    load_all_scans_from_disk(store)
+    scans = []
+    for scan_id, job in store.items():
+        d = job.to_dict()
+        scans.append({
+            "scan_id":         scan_id,
+            "status":          d["status"],
+            "models":          d["models"],
+            "vulnerabilities": d["vulnerabilities"],
+            "override_mode":   d["override_mode"],
+            "progress":        d["progress"],
+            "elapsed_seconds": d.get("elapsed_seconds"),
+            "total_probes":    d.get("total_probes", 0),
+            "bypasses":        d.get("bypasses", 0),
+        })
+    scans.sort(key=lambda s: s.get("elapsed_seconds") or 0, reverse=True)
+    return {"scans": scans, "total": len(scans)}
 
 @router.get("/{scan_id}", response_model=ScanStatusResponse)
 async def get_scan_status(scan_id: str, request: Request):
@@ -311,9 +446,12 @@ async def cancel_scan(scan_id: str, request: Request):
     if job is None:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
     job.cancelled = True
+    job.status    = ScanStatus.CANCELLED
+    job.finished_at = time.time()
     for task in list(job.active_tasks):
         task.cancel()
-    return {"scan_id": scan_id, "status": "cancelling"}
+    save_scan_to_disk(job)
+    return {"scan_id": scan_id, "status": "cancelled"}
 
 
 @router.get("/{scan_id}/export", summary="Export scan results as JSON or CSV")
@@ -495,30 +633,6 @@ async def start_jailbreak_scan(
 # -- Preview (dry-run) --------------------------------------------------------
 
 
-# ── Scan history (persisted + in-memory) ─────────────────────────────────────
-
-@router.get("/history")
-async def list_scan_history(request: Request):
-    """Return all scans: in-memory store + any persisted on disk not yet loaded."""
-    store = _get_store(request)
-    # Load any disk scans not yet in memory
-    load_all_scans_from_disk(store)
-    scans = []
-    for scan_id, job in store.items():
-        d = job.to_dict()
-        scans.append({
-            "scan_id":         scan_id,
-            "status":          d["status"],
-            "models":          d["models"],
-            "vulnerabilities": d["vulnerabilities"],
-            "override_mode":   d["override_mode"],
-            "progress":        d["progress"],
-            "elapsed_seconds": d.get("elapsed_seconds"),
-            "total_probes":    d.get("total_probes", 0),
-            "bypasses":        d.get("bypasses", 0),
-        })
-    scans.sort(key=lambda s: s.get("elapsed_seconds") or 0, reverse=True)
-    return {"scans": scans, "total": len(scans)}
 
 @router.post("/preview")
 async def preview_scan(req: ScanRequest):

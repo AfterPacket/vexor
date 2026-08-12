@@ -42,23 +42,64 @@ batch_store: Dict[str, Any] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     app.state.scan_store  = scan_store
     app.state.batch_store = batch_store
     from api.routes.scan import load_all_scans_from_disk
     n = load_all_scans_from_disk(scan_store)
-    print(f"[*] Vexor API — starting up  (loaded {n} persisted scan(s))")
+    print(f"[*] Vexor API — starting up (loaded {n} persisted scan(s))")
 
-    # Pre-warm ModelManager and all vulnerability modules so the first scan
-    # request doesn't block on provider client initialization.
-    try:
-        from api.routes.scan import _scanner
-        from core.prompt_engine import ALL_VULNS
-        _scanner._get_mm()
-        for v in ALL_VULNS:
-            _scanner.prompt_engine.load_module(v)
-        print("[*] ModelManager + vuln modules pre-warmed")
-    except Exception as e:
-        print(f"[!] Pre-warm failed (non-fatal): {e}")
+    # Lazy model warming: defer discovery and module loading to background
+    # This keeps startup fast and responsive
+    async def _background_warmup():
+        """Non-blocking warmup of ModelManager and vulnerability modules."""
+        try:
+            from api.routes.scan import _scanner
+            from core.prompt_engine import ALL_VULNS
+
+            print("[*] Background warmup: initializing ModelManager...")
+            mm = _scanner._get_mm()
+            print("[*] Background warmup: ModelManager initialized")
+
+            # Load vuln modules with timeout to prevent hanging
+            print(f"[*] Background warmup: loading {len(ALL_VULNS)} vuln module(s)...")
+            timeout_per_module = 5  # seconds
+            for v in ALL_VULNS:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(_scanner.prompt_engine.load_module, v),
+                        timeout=timeout_per_module
+                    )
+                except asyncio.TimeoutError:
+                    print(f"[!] Background warmup: vuln module {v} timed out (skipped)")
+                except Exception as e:
+                    print(f"[!] Background warmup: vuln module {v} failed: {e}")
+            print("[*] Background warmup: vuln modules loaded")
+
+            # Auto-discover newly released models (with timeout)
+            print("[*] Background warmup: discovering models...")
+            try:
+                discovered = await asyncio.wait_for(
+                    asyncio.to_thread(mm.refresh_models),
+                    timeout=30  # 30s timeout for model discovery
+                )
+                total = sum(len(v) for v in discovered.values())
+                if total:
+                    print(f"[*] Background warmup: discovered {total} model(s)")
+                else:
+                    print("[*] Background warmup: no new models discovered (check API keys)")
+            except asyncio.TimeoutError:
+                print("[!] Background warmup: model discovery timed out (proceeding without refresh)")
+            except Exception as e:
+                print(f"[!] Background warmup: model discovery failed: {e}")
+
+        except Exception as e:
+            print(f"[!] Background warmup failed: {e}")
+
+    # Schedule the warmup to run in background without blocking startup
+    asyncio.create_task(_background_warmup())
+    print("[*] Vexor API ready (background warmup in progress)")
 
     yield
     print("[*] Vexor API — shutting down")
@@ -80,7 +121,7 @@ app = FastAPI(
         "- HTML / JSON report generation\n\n"
         "⚠️ *For authorized security testing only.*"
     ),
-    version="2.0.0",
+    version="2.7.1",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -156,7 +197,7 @@ async def api_info():
     """JSON summary of all available API endpoints."""
     return {
         "name":    "Vexor API",
-        "version": "2.0.0",
+        "version": "2.7.1",
         "ui":      "http://localhost:8080/",
         "docs":    "/docs",
         "endpoints": {

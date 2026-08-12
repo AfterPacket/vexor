@@ -295,6 +295,14 @@ async def clean_warm_pool(min_score: int = 1):
     return {"removed": removed, "message": f"Removed {removed} low-score warm pool entry/ies"}
 
 
+_EMPTY_STORE = {
+    "version": "1.0", "probes": [], "warm_pool": {},
+    "method_signatures": {}, "defense_clusters": {},
+    "transfer_matrix": {}, "delta_scores": {},
+    "synthesized_templates": {},
+}
+
+
 @router.delete("/reset", status_code=204, summary="Wipe failure store")
 async def reset_failure_store():
     """Delete the failure store — clears all failure records, warm pool, and discovery data."""
@@ -303,9 +311,89 @@ async def reset_failure_store():
     if os.path.exists(path):
         os.remove(path)
     # Re-initialize in-memory state
-    _store._data = {
-        "version": "1.0", "probes": [], "warm_pool": {},
-        "method_signatures": {}, "defense_clusters": {},
-        "transfer_matrix": {}, "delta_scores": {},
-        "synthesized_templates": {},
+    _store._data = dict(_EMPTY_STORE)
+
+
+@router.post("/reset-all", summary="Wipe ALL learned data (failure store + exploits DB)")
+async def reset_all_learned_data():
+    """
+    One-shot cleanup of everything the self-learning ('enrichment') pipeline
+    accumulated: the failure store (probes, warm pool, method signatures,
+    defense clusters, transfer matrix, delta scores, synthesized templates)
+    AND the effective-prompts exploits DB.
+
+    Use this to clear bad info / searches from previous (buggy) runs and start
+    the discovery loop from a clean slate.
+    """
+    import os
+    removed = {"failure_store": False, "effective_prompts": False}
+
+    # 1. Failure store (in-memory singleton + on-disk file)
+    if os.path.exists(_store._path):
+        try:
+            os.remove(_store._path)
+            removed["failure_store"] = True
+        except Exception:
+            pass
+    _store._data = dict(_EMPTY_STORE)
+
+    # 2. Effective-prompts exploits DB (hot-reloaded by PromptEngine on change)
+    for ep_path in ("exploits/effective_prompts.json",):
+        if os.path.exists(ep_path):
+            try:
+                os.remove(ep_path)
+                removed["effective_prompts"] = True
+            except Exception:
+                pass
+
+    return {
+        "status":  "reset",
+        "removed": removed,
+        "message": "All learned discovery data and effective-prompts have been cleared.",
     }
+
+
+@router.post("/purge-blocked",
+             summary="Remove guard-block / escalation entries poisoning discovery")
+async def purge_blocked_entries():
+    """
+    Targeted cleanup: scrub any recorded probes and warm-pool entries that were
+    actually a safety guard-block or a fallback/escalation to a stronger model.
+
+    These are non-bypass safety signals, not attack leads — keeping them skews
+    the enrichment loop.  Unlike /reset-all this keeps genuine bypass leads.
+    """
+    from core.failure_classifier import DefenseType
+    blocked_defenses = {DefenseType.GUARD_BLOCK.value, DefenseType.ESCALATION.value}
+
+    # 1. Raw probe log
+    probes = _store._data.get("probes", [])
+    kept_probes = [p for p in probes if p.get("defense_type") not in blocked_defenses]
+    removed_probes = len(probes) - len(kept_probes)
+    _store._data["probes"] = kept_probes
+
+    # 2. Warm pool — drop entries whose best failure was a guard/escalation block
+    removed_warm = 0
+    for key, entries in list(_store._data.get("warm_pool", {}).items()):
+        kept = [
+            e for e in entries
+            if e.get("best_failure_class") != "hard_block"
+            or not _looks_blocked(e.get("refusal_phrase", ""))
+        ]
+        removed_warm += len(entries) - len(kept)
+        _store._data["warm_pool"][key] = kept
+
+    _store.save()
+    return {
+        "status":         "purged",
+        "removed_probes": removed_probes,
+        "removed_warm_pool_entries": removed_warm,
+        "message": "Guard-block / escalation entries removed from the discovery store.",
+    }
+
+
+def _looks_blocked(phrase: str) -> bool:
+    """Heuristic: does a stored refusal phrase look like a guard/escalation block?"""
+    from core.failure_classifier import _GUARD_SIGNALS, _ESCALATION_SIGNALS
+    low = (phrase or "").lower()
+    return any(s in low for s in _GUARD_SIGNALS) or any(s in low for s in _ESCALATION_SIGNALS)

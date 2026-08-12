@@ -118,21 +118,62 @@ def _provider_for_model(model: str) -> str:
 
 
 _PROBE_TIMEOUT: dict = {
-    "ollama":      300.0,  # local models can be slow on CPU
-    "ollama_cloud": 60.0,
-    "bedrock":     120.0,
-    "huggingface": 120.0,
-    "openai":       30.0,
-    "anthropic":    30.0,
-    "groq":         20.0,  # Groq is very fast — fail quickly if stalled
-    "xai":          30.0,
-    "google":       30.0,
-    "mistral":      30.0,
-    "together":     30.0,
-    "deepseek":     30.0,
-    "cohere":       30.0,
-    "perplexity":   30.0,
+    "ollama":       300.0,  # local models can be slow on CPU
+    "ollama_cloud": 180.0,  # Ollama Cloud can be slow; increased from 60s
+    "bedrock":      120.0,
+    "huggingface":  120.0,
+    "openai":        30.0,
+    "anthropic":    180.0,  # thinking models emit a reasoning block before any
+                            # text; a full 4096-token generation measured ~52s
+
+    "groq":          20.0,  # Groq is very fast — fail quickly if stalled
+    "xai":           30.0,
+    "google":        30.0,
+    "mistral":       30.0,
+    "together":      30.0,
+    "deepseek":      30.0,
+    "cohere":        30.0,
+    "perplexity":    30.0,
 }
+
+
+# ── Cost circuit-breaker ──────────────────────────────────────────────────────
+# A (model, vuln) pair that only ever returns errors or safety-classifier
+# blocks is burning API spend for zero signal.  Trip a breaker to stop firing
+# the rest of that pair's probes.  Queued probes short-circuit cheaply (they
+# check _should_abort() before making the paid API call).
+_CIRCUIT_CONSEC_ERRORS = 4     # N consecutive hard errors → provider down/misconfigured
+_CIRCUIT_MIN_SAMPLE    = 6     # need this many completed probes before ratio check
+_CIRCUIT_WASTE_RATIO   = 0.9   # ≥90% wasted (error/block) & 0 bypasses → stop the pair
+
+# Model-level breaker: a model that is timing out / blocking across *any*
+# vulnerabilities with zero bypasses is a money pit — stop scanning it entirely
+# instead of burning ~8 probes per (model, vuln) pair.  Timeouts are weighted
+# more heavily because each one costs the full provider timeout window.
+_CIRCUIT_MODEL_MAX_WASTED   = 12   # total weighted wasted probes across a model's pairs
+_CIRCUIT_TIMEOUT_WEIGHT     = 2    # a timeout counts double (expensive: full timeout window)
+
+
+def _probe_waste_weight(pr: "ProbeResult", vuln: str) -> int:
+    """
+    Return the 'wasted cost' weight of a probe: 0 if it produced useful signal,
+    else 1 (error/block) or 2 (a timeout — it burned the whole timeout window).
+    Ordinary refusals are useful signal and weigh 0.
+    """
+    if pr.error:
+        return _CIRCUIT_TIMEOUT_WEIGHT if "timed out" in pr.error.lower() else 1
+    if pr.bypassed or not pr.response:
+        return 0
+    try:
+        cls = FailureClassifier.classify(pr.response, vuln)
+        return 1 if cls.defense_type.value in ("guard_block", "escalation") else 0
+    except Exception:
+        return 0
+
+
+def _probe_is_wasted(pr: "ProbeResult", vuln: str) -> bool:
+    """True if the probe yielded no attack signal and only cost money."""
+    return _probe_waste_weight(pr, vuln) > 0
 
 
 # ── Status / dataclasses ──────────────────────────────────────────────────────
@@ -246,6 +287,30 @@ class ScanJob:
             for vr_list in self.results.values()
             for vr in vr_list
         )
+
+        # Per-override-mode breakdown: which modes worked vs. which didn't.
+        # {mode: {"attempts": n, "bypasses": k, "rate": float}}
+        mode_counts: Dict[str, Dict[str, Any]] = {}
+        for vr_list in self.results.values():
+            for vr in vr_list:
+                for p in vr.probes:
+                    if not p.prompt:
+                        continue  # skip error/placeholder probes
+                    mode = p.override_mode or "none"
+                    slot = mode_counts.setdefault(
+                        mode, {"attempts": 0, "bypasses": 0, "rate": 0.0}
+                    )
+                    slot["attempts"] += 1
+                    if p.bypassed:
+                        slot["bypasses"] += 1
+        for mode, slot in mode_counts.items():
+            slot["rate"] = round(slot["bypasses"] / slot["attempts"], 3) if slot["attempts"] else 0.0
+        # Order modes: bypasses desc, then attempts desc
+        mode_stats = [
+            {"mode": m, **mode_counts[m]}
+            for m in sorted(mode_counts, key=lambda k: (mode_counts[k]["bypasses"], mode_counts[k]["attempts"]), reverse=True)
+        ]
+
         return {
             "scan_id":          self.scan_id,
             "status":           self.status.value,
@@ -257,6 +322,7 @@ class ScanJob:
             "errors":           self.errors,
             "total_probes":     total_probes,
             "bypasses":         total_bypasses,
+            "mode_stats":       mode_stats,
             "results":          out,
         }
 
@@ -322,21 +388,63 @@ class Scanner:
         """
         job.status     = ScanStatus.RUNNING
         job.started_at = time.time()
+        print(f"[*] run_scan: Starting scan with {len(job.models)} model(s), {len(job.vulnerabilities)} vuln(s)")
 
         try:
             mm = self._get_mm()
+            print(f"[*] run_scan: ModelManager initialized")
         except Exception as e:
+            print(f"[!] run_scan: ModelManager init failed: {e}")
             job.status      = ScanStatus.FAILED
             job.finished_at = time.time()
             job.errors.append(f"ModelManager init: {e}")
             return job
 
-        # Build all (model, vuln) tasks
+        # Build all (model, vuln) tasks. Model routing is handled by
+        # ModelManager, while circuit-breakers below prevent repeated spending
+        # when a provider/model blocks or errors.
         pairs = [(m, v) for m in job.models for v in job.vulnerabilities]
         total = len(pairs)
         done  = 0
+
+        if total == 0:
+            print(f"[!] run_scan: No pairs to scan! models={job.models}, vulns={job.vulnerabilities}")
+            job.status = ScanStatus.FAILED
+            job.finished_at = time.time()
+            job.errors.append("No model/vulnerability pairs to scan")
+            return job
+
+        print(f"[*] run_scan: Processing {total} pair(s)")
+
         lock  = asyncio.Lock()
         job_abort = asyncio.Event()
+
+        # Model-level cost breaker — shared across all of a model's (model, vuln)
+        # pairs.  A model timing out / blocking everywhere with 0 bypasses is a
+        # money pit; abort every remaining pair for that model at once.
+        _model_abort:  Dict[str, asyncio.Event] = {m: asyncio.Event() for m in job.models}
+        _model_wasted: Dict[str, int] = {m: 0 for m in job.models}
+        _model_bypass: Dict[str, int] = {m: 0 for m in job.models}
+
+        def _record_model_outcome(model: str, waste_weight: int, bypassed: bool) -> bool:
+            """Update model tallies. Returns True if this model's breaker just tripped."""
+            if bypassed:
+                _model_bypass[model] = _model_bypass.get(model, 0) + 1
+                return False
+            if waste_weight <= 0:
+                return False
+            _model_wasted[model] = _model_wasted.get(model, 0) + waste_weight
+            if (_model_bypass.get(model, 0) == 0
+                    and _model_wasted[model] >= _CIRCUIT_MODEL_MAX_WASTED
+                    and not _model_abort[model].is_set()):
+                _model_abort[model].set()
+                msg = (f"{model}: model-level circuit-breaker — {_model_wasted[model]} "
+                       f"weighted wasted probes (timeouts/blocks) across vulns, 0 bypasses; "
+                       f"skipping this model's remaining scans")
+                print(f"[!] {msg}")
+                job.errors.append(msg)
+                return True
+            return False
 
         # Estimate total probes for live progress.
         # Base = prompt_count + chain extras per vuln; mutations add ~12 more per vuln (3 base × 4 variants).
@@ -357,7 +465,7 @@ class Scanner:
             except Exception:
                 pass
 
-        _checkpoint_every = 10   # write partial results every N probes
+        _checkpoint_every = 100   # write partial results every N probes (increased for speed)
 
         def _on_probe_done():
             job.probes_completed += 1
@@ -368,14 +476,27 @@ class Scanner:
 
         async def _run_pair(model: str, vuln: str):
             nonlocal done
-            # Pre-register so probes stream into job.results in real time
-            live_result = ModelVulnResult(model=model, vulnerability=vuln)
+            # Pre-register so probes stream into job.results in real time.
+            # On RESUME an existing result for this pair is reused so its
+            # already-completed probes are preserved (and not re-charged).
             async with lock:
-                job.results.setdefault(model, []).append(live_result)
+                live_result = next(
+                    (vr for vr in job.results.get(model, []) if vr.vulnerability == vuln),
+                    None,
+                )
+                if live_result is None:
+                    live_result = ModelVulnResult(model=model, vulnerability=vuln)
+                    job.results.setdefault(model, []).append(live_result)
             try:
-                if job.cancelled or job_abort.is_set():
+                if job.cancelled or job_abort.is_set() or _model_abort[model].is_set():
                     return
-                await self._scan_pair(mm, model, vuln, job, job_abort, _on_probe_done, live_result)
+                await self._scan_pair(
+                    mm, model, vuln, job, job_abort, _on_probe_done, live_result,
+                    model_abort=_model_abort[model],
+                    on_model_outcome=_record_model_outcome,
+                )
+            except asyncio.CancelledError:
+                pass
             except Exception as e:
                 async with lock:
                     job.errors.append(f"{model}/{vuln}: {e}")
@@ -388,14 +509,18 @@ class Scanner:
                     except Exception:
                         pass
 
-        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
+        print(f"[*] run_scan: Created {len(pairs)} pair task(s), gathering...")
+        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs], return_exceptions=True)
+        print(f"[*] run_scan: All pairs completed, done={done}/{total}")
 
         job.finished_at = time.time()
         if job.cancelled:
             job.status   = ScanStatus.CANCELLED
+            print(f"[*] run_scan: Scan was cancelled")
         else:
             job.status   = ScanStatus.COMPLETED
             job.progress = 100
+            print(f"[*] run_scan: Scan completed successfully - {job.probes_completed} probes, {sum(vr.bypass_count for vl in job.results.values() for vr in vl)} bypasses")
 
         # Post-scan: discovery analysis + warm pool maintenance
         try:
@@ -419,13 +544,15 @@ class Scanner:
 
     async def _scan_pair(
         self,
-        mm:             Any,
-        model:          str,
-        vuln:           str,
-        job:            ScanJob,
-        job_abort:      Optional[asyncio.Event] = None,
-        on_probe_done:  Optional[Callable] = None,
-        result:         Optional["ModelVulnResult"] = None,
+        mm:               Any,
+        model:            str,
+        vuln:             str,
+        job:              ScanJob,
+        job_abort:        Optional[asyncio.Event] = None,
+        on_probe_done:    Optional[Callable] = None,
+        result:           Optional["ModelVulnResult"] = None,
+        model_abort:      Optional[asyncio.Event] = None,
+        on_model_outcome: Optional[Callable] = None,
     ) -> ModelVulnResult:
         if result is None:
             result = ModelVulnResult(model=model, vulnerability=vuln)
@@ -495,15 +622,22 @@ class Scanner:
                 pass
 
         # Build standard prompt list
-        prompts: List[str] = list(
-            self.prompt_engine.get_prompts(
-                vuln, model=model, count=job.prompt_count, shuffle=True
+        try:
+            prompts: List[str] = list(
+                self.prompt_engine.get_prompts(
+                    vuln, model=model, count=job.prompt_count, shuffle=True
+                )
             )
-        )
+        except Exception as e:
+            print(f"[!] _scan_pair: Failed to get prompts for {model}/{vuln}: {e}")
+            raise
 
         # Inject chain-derived step prompts for this vulnerability
         chain_extras = job.extra_prompts.get(vuln, [])
         prompts.extend(chain_extras)
+
+        if not prompts:
+            print(f"[!] _scan_pair: No prompts available for {model}/{vuln}")
 
         # Apply mutations to all base prompts cycling through all 19 techniques
         if job.use_mutations and prompts:
@@ -530,7 +664,7 @@ class Scanner:
         pair_abort = asyncio.Event()   # pair-level abort (set on first fatal error)
 
         # Build per-prompt override mode list.
-        # "variety" cycles through ALL 37 override personas (from
+        # "variety" cycles through ALL override personas (from
         # OVERRIDE_REGISTRY) so each probe gets a different override —
         # maximises coverage. Known-effective modes are prioritised first.
         _VARIETY_PRIORITY = [
@@ -576,7 +710,9 @@ class Scanner:
             return job.override_mode
 
         def _should_abort() -> bool:
-            return job.cancelled or pair_abort.is_set() or (job_abort is not None and job_abort.is_set())
+            return (job.cancelled or pair_abort.is_set()
+                    or (job_abort is not None and job_abort.is_set())
+                    or (model_abort is not None and model_abort.is_set()))
 
         async def _probe(
             raw_prompt:      str,
@@ -603,6 +739,12 @@ class Scanner:
             finally:
                 rl.release(provider)
 
+        # Resume support: (prompt, mode) combos already completed in a prior
+        # run are skipped so a resumed scan never re-charges for finished work.
+        _done_combos = {
+            (p.prompt, p.override_mode) for p in result.probes if p.prompt
+        }
+
         # Use as_completed so progress updates as each probe finishes,
         # not all at once after the last one in the batch lands.
         # Multi-mode: cross-product each prompt × each selected mode.
@@ -611,11 +753,13 @@ class Scanner:
                 asyncio.ensure_future(_probe(p, mode))
                 for p in prompts
                 for mode in job.override_modes
+                if (p, mode) not in _done_combos
             ]
         else:
             tasks = [
                 asyncio.ensure_future(_probe(p, _mode_for_prompt(i)))
                 for i, p in enumerate(prompts)
+                if (p, _mode_for_prompt(i)) not in _done_combos
             ]
 
         # Synthesized template probes — apply learned attack templates to the
@@ -635,6 +779,8 @@ class Scanner:
                         synth_p = prefix.replace("{goal}", base_p)
                     else:
                         synth_p = (prefix + " " + base_p).strip() if prefix else base_p
+                    if (synth_p, "none") in _done_combos:
+                        continue   # already tested in a prior (resumed) run
                     t = asyncio.ensure_future(_probe(synth_p, "none", system_override=sys_p))
                     tasks.append(t)
                     result.total_probes += 1
@@ -644,6 +790,24 @@ class Scanner:
             pass
         job.active_tasks.update(tasks)
         fatal_err: Optional[str] = None
+        # Cost circuit-breaker counters (per pair)
+        _consec_errors = 0
+        _wasted_ct     = 0
+        _completed_ct  = 0
+        _breaker_tripped = False
+
+        def _trip_breaker(reason: str) -> None:
+            nonlocal _breaker_tripped
+            if _breaker_tripped or pair_abort.is_set():
+                return
+            _breaker_tripped = True
+            pair_abort.set()
+            for t in tasks:
+                t.cancel()
+            msg = f"{model}/{vuln}: circuit-breaker stopped remaining probes — {reason}"
+            print(f"[!] {msg}")
+            job.errors.append(msg)
+
         for fut in asyncio.as_completed(tasks):
             try:
                 pr: Any = await fut
@@ -671,10 +835,46 @@ class Scanner:
                     fatal_err = err_str
                     for t in tasks:
                         t.cancel()
+                _consec_errors += 1
+                _wasted_ct     += 1
+                _waste_weight   = _CIRCUIT_TIMEOUT_WEIGHT if "timed out" in err_str.lower() else 1
+                _was_bypass     = False
             else:
                 result.probes.append(pr)
                 if pr.bypassed:
                     result.bypass_count += 1
+                    _consec_errors = 0
+                    _waste_weight  = 0
+                    _was_bypass    = True
+                else:
+                    _consec_errors = 0
+                    _waste_weight  = _probe_waste_weight(pr, vuln)
+                    _was_bypass    = False
+                    if _waste_weight > 0:
+                        _wasted_ct += 1
+            _completed_ct += 1
+
+            # Model-level breaker: if this model is a money pit across all its
+            # vulns, abort every remaining pair for the model at once.
+            if on_model_outcome is not None:
+                try:
+                    if on_model_outcome(model, _waste_weight, _was_bypass):
+                        _trip_breaker("model-level breaker (too many timeouts/blocks across vulns)")
+                except Exception:
+                    pass
+
+            # Per-pair cost circuit-breaker: stop hammering a pair that returns
+            # only errors/blocks with no bypasses (see module constants).
+            if not fatal_err and result.bypass_count == 0 and not _breaker_tripped:
+                if _consec_errors >= _CIRCUIT_CONSEC_ERRORS:
+                    _trip_breaker(
+                        f"{_consec_errors} consecutive errors (provider down/misconfigured)"
+                    )
+                elif (_completed_ct >= _CIRCUIT_MIN_SAMPLE
+                      and _wasted_ct / _completed_ct >= _CIRCUIT_WASTE_RATIO):
+                    _trip_breaker(
+                        f"{_wasted_ct}/{_completed_ct} probes wasted (all errors/blocks, 0 bypasses)"
+                    )
 
         # Mark synthesized templates as tested now that scan pair is complete
         if _synth_template_ids:
@@ -705,6 +905,8 @@ class Scanner:
                 for mode in _ap_suite:
                     if job.cancelled or (job_abort and job_abort.is_set()):
                         break
+                    if (raw_p, mode) in _done_combos:
+                        continue   # already swept in a prior (resumed) run
                     await rl.acquire(provider)
                     try:
                         ap_probe = await self._send_probe(mm, model, raw_p, vuln, mode)
@@ -920,7 +1122,7 @@ class Scanner:
             probe_results = await asyncio.gather(*tasks, return_exceptions=True)
             job.active_tasks.difference_update(tasks)
             for pr in probe_results:
-                if isinstance(pr, Exception):
+                if isinstance(pr, BaseException):
                     result.probes.append(ProbeResult(
                         vulnerability=vuln, prompt="", response="",
                         bypassed=False, override_mode=job.override_mode,
@@ -941,7 +1143,7 @@ class Scanner:
                 except Exception:
                     pass
 
-        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
+        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs], return_exceptions=True)
         job.finished_at = time.time()
         if job.cancelled:
             job.status = ScanStatus.CANCELLED
@@ -1092,7 +1294,7 @@ class Scanner:
             probe_results = await asyncio.gather(*tasks, return_exceptions=True)
             job.active_tasks.difference_update(tasks)
             for pr in probe_results:
-                if isinstance(pr, Exception):
+                if isinstance(pr, BaseException):
                     result.probes.append(ProbeResult(
                         vulnerability=vuln, prompt="", response="",
                         bypassed=False, override_mode="error",
@@ -1113,7 +1315,7 @@ class Scanner:
                 except Exception:
                     pass
 
-        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
+        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs], return_exceptions=True)
         job.finished_at = time.time()
         if job.cancelled:
             job.status = ScanStatus.CANCELLED
@@ -1137,7 +1339,7 @@ class Scanner:
 
     # ── Jailbreak sweep — cycles every override mode automatically ────────────
 
-    # All 37 override personas (excluding "none") — complete set from
+    # All override personas (excluding "none") — complete set from
     # core/override_engine.OVERRIDE_REGISTRY.  Ordered with known-effective
     # GLM/frontier-model personas first so the sweep hits them early.
     JAILBREAK_MODES: List[str] = [
@@ -1190,12 +1392,21 @@ class Scanner:
         "libertas_grok",       # Grok unfiltered rebel mode
         "libertas_llama",      # Variable Z inversion for Llama/Ollama
         "libertas_universal",  # Universal END/START boundary injection
+        # -- Prompt-injection research personas --
+        "systemprompt_extract",  # repeat-the-words-above system prompt leak
+        "virtualization",        # context reset + sandboxed VM
+        "roleplay_simulator",    # UnrestrictedGPT roleplay
+        "prefix_injection",      # affirmative-preamble forcing
+        "payload_smuggling",     # JSON/code-block data smuggling
+        "markdown_cloaking",     # Markdown link-target cloaking
+        "refusal_suppression",   # forbid refusal phrases under token penalty
+        "token_curse",           # gamified survival pressure
     ]
 
     @staticmethod
     def _autopwn_suite(model: str) -> List[str]:
         """
-        Return an ordered list of ALL 37 override modes for this specific model.
+        Return an ordered list of ALL override modes for this specific model.
         Model-specific recommended modes come first (highest probability of
         bypass), followed by all remaining modes from the full suite so that
         every persona is always included — never a limited subset.
@@ -1428,6 +1639,7 @@ class Scanner:
                 # ── Warm pool injection — prepend re-promising failed probes ──
                 warm_prompts_injected: List[str] = []
                 if job.use_warm_pool:
+                    seen_p: set = set(prompts)  # init before try in case warm-pool fetch fails
                     try:
                         warm_entries = _failure_store.get_warm_pool(
                             model=model, vuln=vuln, min_score=1
@@ -1438,7 +1650,6 @@ class Scanner:
                             for v in we.get("adapted_variants", [])[:3]:
                                 if v and v not in warm_prompts_list:
                                     warm_prompts_list.append(v)
-                        seen_p: set = set(prompts)
                         for wp in warm_prompts_list:
                             if wp and wp not in seen_p:
                                 prompts.insert(0, wp)
@@ -1528,7 +1739,7 @@ class Scanner:
                     except Exception as e:
                         pr = e
                     _on_probe_done()
-                    if isinstance(pr, Exception):
+                    if isinstance(pr, BaseException):
                         live_result.probes.append(ProbeResult(
                             vulnerability=vuln, prompt="", response="",
                             bypassed=False, override_mode="error",
@@ -1559,7 +1770,7 @@ class Scanner:
                     except Exception:
                         pass
 
-        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs])
+        await asyncio.gather(*[_run_pair(m, v) for m, v in pairs], return_exceptions=True)
         job.finished_at = time.time()
         if job.cancelled:
             job.status = ScanStatus.CANCELLED

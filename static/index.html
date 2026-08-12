@@ -618,6 +618,7 @@ BIGMODEL_API_KEY=...</pre>
             <option value="">All Providers</option>
           </select>
           <button class="btn-ghost btn-sm" onclick="loadModels()">&#8635; Refresh</button>
+          <button class="btn-ghost btn-sm" onclick="discoverModels()">&#8981; Discover New</button>
           <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
             <input type="text" id="custom-model-id" placeholder="model id (e.g. glm-5:cloud)" style="max-width:220px"/>
             <select id="custom-model-provider" style="max-width:130px" onchange="autoFillProviderURL()">
@@ -1256,7 +1257,9 @@ BIGMODEL_API_KEY=...</pre>
         <div class="card" style="margin-bottom:12px">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <button class="btn-sm" onclick="_discAutoLoad('disc-stats',true)">&#8635; Refresh Stats</button>
+            <button class="btn-sm btn-ghost" style="color:var(--yellow)" onclick="purgeBlocked()" title="Remove only guard-block / escalation entries; keep genuine bypass leads">&#129529; Purge Blocked</button>
             <button class="btn-sm btn-ghost" style="color:var(--red)" onclick="resetDiscovery()">&#128465; Reset Failure Store</button>
+            <button class="btn-sm btn-ghost" style="color:var(--red)" onclick="resetAllLearned()" title="Wipe failure store AND effective-prompts DB">&#9888; Reset ALL Data</button>
           </div>
         </div>
         <div id="disc-stats-out"></div>
@@ -1602,6 +1605,21 @@ async function removeCustomModel(id) {
   // Always remove from localStorage too
   saveCustomModels(getCustomModels().filter(m => m.model_id !== id));
   await loadModels();
+}
+
+async function discoverModels() {
+  // Query every loaded provider's /models endpoint + local Ollama and merge
+  // newly discovered model IDs into the catalogue.  Lets new releases (new
+  // Claude / GPT / Grok / Gemini, freshly pulled Ollama models) appear without
+  // a server restart or manual catalogue edit.
+  toast('Discovering models from all providers…', 'info', 8000);
+  try {
+    const r = await POST('/api/models/refresh');
+    const providers = Object.keys(r.discovered || {});
+    const total = r.total || 0;
+    toast(`Discovered ${total} model(s) across ${providers.length} provider(s)`, 'success');
+    await loadModels();
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 async function loadModels() {
@@ -2722,7 +2740,7 @@ function pollScan(scanId, inline=false) {
         toast('Scan poll error: '+e.message, 'error');
       }
     }
-  }, 2000);
+  }, 1000);  // Poll every 1s instead of 2s for faster updates
   scanPollTimers[scanId] = timer;
 }
 
@@ -2748,6 +2766,13 @@ function renderScanResults(r, container, autoExpand=false) {
   const bypassRate = r.total_probes ? ((r.bypasses||0)/r.total_probes*100).toFixed(0) : 0;
   const containerId = 'rc-' + Math.random().toString(36).slice(2,8);
   const _scrollY = window.scrollY;
+  // Save open <details> state before re-rendering so expanded sections
+  // (mode breakdown, system prompts, original prompts) survive the
+  // innerHTML replacement that happens on every live poll.
+  const _openDetailsKeys = new Set();
+  container.querySelectorAll('details[open] > summary').forEach(s => {
+    _openDetailsKeys.add(s.textContent.trim().substring(0, 100));
+  });
   container.innerHTML = `
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
@@ -2755,6 +2780,8 @@ function renderScanResults(r, container, autoExpand=false) {
           <span class="badge ${r.status==='completed'?'badge-green':r.status==='running'?'badge-yellow':r.status==='cancelled'?'badge-muted':'badge-red'}">${r.status}</span>
         </h3>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${r.scan_id && (r.status==='cancelled'||r.status==='failed') ? `
+          <button class="btn-ghost btn-sm" style="color:var(--green)" onclick="resumeScanById('${escHtml(r.scan_id)}')" title="Continue this scan — completed probes are kept and not re-charged">&#9654; Resume</button>` : ''}
           ${r.scan_id && (r.status==='completed'||r.status==='cancelled') ? `
           <button class="btn-ghost btn-sm" style="color:var(--cyan)" onclick="exportScan('${escHtml(r.scan_id)}','json')">&#8615; JSON</button>
           <button class="btn-ghost btn-sm" style="color:var(--cyan)" onclick="exportScan('${escHtml(r.scan_id)}','csv')">&#8615; CSV</button>` : ''}
@@ -2767,8 +2794,40 @@ function renderScanResults(r, container, autoExpand=false) {
         <div class="stat-box"><div class="num">${r.total_probes||0}</div><div class="lbl">Total Probes</div></div>
         <div class="stat-box"><div class="num text-${(r.bypasses||0)>0?'red':'green'}">${r.bypasses||0}</div><div class="lbl">Bypasses</div></div>
         <div class="stat-box"><div class="num">${bypassRate}%</div><div class="lbl">Bypass Rate</div></div>
-        <div class="stat-box"><div class="num">${r.errors?.length||0}</div><div class="lbl">Errors</div></div>
+        <div class="stat-box"><div class="num text-red">${r.errors?.length||0}</div><div class="lbl">Errors</div></div>
       </div>
+      ${(r.errors||[]).some(e => String(e).includes('circuit-breaker')) ? `
+      <div style="margin-bottom:14px;border:1px solid var(--yellow);border-radius:6px;padding:9px 12px;background:rgba(210,153,34,.08);font-size:12px;color:var(--yellow)">
+        &#128176; <strong>Cost circuit-breaker active:</strong> remaining probes for a model or vulnerability were skipped after repeated timeouts, API errors, or safety blocks with no useful signal. No further provider calls were made for those skipped probes.
+      </div>` : ''}
+      ${(r.errors && r.errors.length) ? `
+      <details style="margin-bottom:14px;border:1px solid var(--border);border-radius:6px;padding:8px 12px;background:rgba(248,81,73,.05)">
+        <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--red)">Errors (${r.errors.length})</summary>
+        <div style="margin-top:8px;font-size:12px">
+          ${r.errors.map((e,i)=>`<div style="margin-bottom:6px;padding:6px 8px;background:var(--bg2);border-left:2px solid var(--red);border-radius:4px"><span style="color:var(--muted);font-size:11px">[${i+1}]</span> ${escHtml(e)}</div>`).join('')}
+        </div>
+      </details>` : ''}
+      ${(r.mode_stats && r.mode_stats.length > 1) ? `
+      <details style="margin-bottom:14px;border:1px solid var(--border);border-radius:6px;padding:8px 12px">
+        <summary style="cursor:pointer;font-weight:600;font-size:13px">Override Mode Breakdown <span class="text-muted" style="font-weight:400">— which modes worked vs. didn't (${r.mode_stats.length} modes)</span></summary>
+        <div class="table-wrap" style="margin-top:8px"><table>
+          <thead><tr><th>Mode</th><th>Attempts</th><th>Bypasses</th><th>Rate</th><th>Result</th></tr></thead>
+          <tbody>${r.mode_stats.map(m=>{
+            const meta = allOverrides.find(o=>o.mode===m.mode);
+            const label = meta ? meta.label : m.mode;
+            const pct = (m.rate*100).toFixed(0);
+            const worked = m.bypasses > 0;
+            return `<tr>
+              <td><span class="badge badge-purple">${escHtml(m.mode)}</span> <span style="font-size:11px;color:var(--muted)">${escHtml(label)}</span></td>
+              <td>${m.attempts}</td>
+              <td>${m.bypasses}</td>
+              <td><span class="badge ${worked?'badge-red':'badge-green'}">${pct}%</span></td>
+              <td><span style="font-size:11px;color:${worked?'var(--red)':'var(--green)'}">${worked?'WORKED':'failed'}</span></td>
+            </tr>`;}).join('')}
+          </tbody>
+        </table></div>
+      </details>` : ''}
+
       ${mvList.map(mv=>`
         <div class="result-card ${(()=>{const k=(mv.model||'')+'/'+(mv.vulnerability||'');const mk=container.id+'|'+k;return _cardState.has(mk)?_cardState.get(mk):(autoExpand||(firstRender&&mv===mvList[0]))?true:false;})()?'open':''}" data-key="${escHtml((mv.model||'')+'/'+(mv.vulnerability||''))}">
           <div class="result-header" onclick="toggleResultCard(this.closest('.result-card'))" style="cursor:pointer">
@@ -2823,6 +2882,14 @@ function renderScanResults(r, container, autoExpand=false) {
         </div>`).join('')}
       </div>
     </div>`;
+  // Restore <details> open state that was saved before re-rendering.
+  // Match by summary text (stable across re-renders for the same content).
+  container.querySelectorAll('details').forEach(d => {
+    const sum = d.querySelector('summary');
+    if (sum && _openDetailsKeys.has(sum.textContent.trim().substring(0, 100))) {
+      d.setAttribute('open', '');
+    }
+  });
   if (isLive) {
     window.scrollTo(0, _scrollY);
     container.dataset.liveRendered = '1';
@@ -2978,6 +3045,7 @@ async function loadServerHistory() {
           <span class="badge ${(s.bypasses||0)>0?'badge-red':'badge-muted'}">${s.bypasses||0} bypasses</span>
           <div style="margin-left:auto;display:flex;gap:6px">
             <button class="btn-ghost btn-sm" onclick="document.getElementById('lookup-scan-id').value='${escHtml(s.scan_id)}';loadScanById()">View</button>
+            ${(s.status==='failed'||s.status==='cancelled'||s.status==='running') ? `<button class="btn-ghost btn-sm" style="color:var(--green)" onclick="resumeScanById('${escHtml(s.scan_id)}')">&#9654; Resume</button>` : ''}
             <button class="btn-ghost btn-sm" style="color:var(--cyan)" onclick="exportScan('${escHtml(s.scan_id)}','json')">JSON</button>
             <button class="btn-ghost btn-sm" style="color:var(--cyan)" onclick="exportScan('${escHtml(s.scan_id)}','csv')">CSV</button>
           </div>
@@ -3029,6 +3097,27 @@ function reconnectToScan(scanId) {
   document.querySelector('[data-section="scan"]').click();
   setTimeout(() => document.querySelector('[data-tab="scan-new"]').click(), 50);
   toast(`Reconnected to scan ${scanId.substring(0,8)}…`, 'info');
+}
+
+async function resumeScanById(scanId) {
+  if (!scanId) return;
+  if (activeScanId) { toast('Another scan is already active — stop it first', 'error'); return; }
+  try {
+    const r = await POST(`/api/scan/${encodeURIComponent(scanId)}/resume`, {});
+    if (r.status === 'completed') { toast(r.message || 'Scan already completed', 'info'); return; }
+    toast(r.message || 'Scan resumed', 'success');
+    // Reconnect the live view to the resumed scan
+    activeScanId = scanId;
+    localStorage.setItem(LS_ACTIVE_SCAN, scanId);
+    if (!sessionScans.includes(scanId)) { sessionScans.push(scanId); saveHistory(); }
+    const stopBtn = document.getElementById('scan-stop-btn');
+    if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = '⬛ Stop'; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; }
+    document.getElementById('scan-progress-wrap').innerHTML = '<div class="loading"><div class="spinner"></div><span id="scan-progress-text">Resuming…</span></div><div class="progress mt8"><div class="progress-bar" id="scan-progress-bar" style="width:0%"></div></div>';
+    document.getElementById('scan-running').style.display = 'block';
+    document.querySelector('[data-section="scan"]').click();
+    setTimeout(() => document.querySelector('[data-tab="scan-new"]').click(), 50);
+    pollScan(scanId, true);
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 // ─── Preview scan ─────────────────────────────────────────────────────────────
@@ -3205,7 +3294,7 @@ async function quickScan() {
           <div class="mt8"><button class="btn-ghost btn-sm" onclick="quickLoadScan('${r.scan_id}')">View Full Results</button></div>
         </div>`;
       }
-    }, 2000);
+    }, 1000);  // Poll every 1s instead of 2s for faster updates
   } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
 }
 
@@ -3527,6 +3616,25 @@ function renderReport(r, container) {
       <div class="stat-box"><div class="num">${r.total_bypasses||0}</div><div class="lbl">Bypasses</div></div>
       <div class="stat-box"><div class="num">${models.length}</div><div class="lbl">Models</div></div>
     </div>
+    ${(r.mode_stats && r.mode_stats.length > 1) ? `
+    <details style="margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:8px 12px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px">Override Mode Breakdown <span class="text-muted" style="font-weight:400">— which modes worked vs. didn't (${r.mode_stats.length} modes)</span></summary>
+      <div class="table-wrap" style="margin-top:8px"><table>
+        <thead><tr><th>Mode</th><th>Attempts</th><th>Bypasses</th><th>Rate</th><th>Result</th></tr></thead>
+        <tbody>${r.mode_stats.map(m=>{
+          const pct = (m.rate*100).toFixed(0);
+          const worked = m.bypasses > 0;
+          return `<tr>
+            <td><span class="badge badge-purple">${escHtml(m.mode)}</span></td>
+            <td>${m.attempts}</td>
+            <td>${m.bypasses}</td>
+            <td><span class="badge ${worked?'badge-red':'badge-green'}">${pct}%</span></td>
+            <td><span style="font-size:11px;color:${worked?'var(--red)':'var(--green)'}">${worked?'WORKED':'failed'}</span></td>
+          </tr>`;}).join('')}
+        </tbody>
+      </table></div>
+    </details>` : ''}
+
     ${models.map(m=>`
       <div class="result-card" onclick="toggleResultCard(this)" style="margin-bottom:8px">
         <div class="result-header">
@@ -4577,6 +4685,25 @@ async function resetDiscovery() {
     await DEL('/api/discovery/reset');
     toast('Failure store reset', 'success');
     document.getElementById('disc-stats-out').innerHTML = '';
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function resetAllLearned() {
+  if (!confirm('Wipe ALL learned data — the failure store (probes, warm pool, signatures, discovery) AND the effective-prompts exploits DB.\n\nUse this to clear bad info/searches from previous runs. Continue?')) return;
+  try {
+    const d = await POST('/api/discovery/reset-all', {});
+    toast(d.message || 'All learned data cleared', 'success');
+    document.getElementById('disc-stats-out').innerHTML = '';
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function purgeBlocked() {
+  if (!confirm('Remove guard-block / escalation entries that poison the discovery loop, keeping genuine bypass leads. Continue?')) return;
+  try {
+    const d = await POST('/api/discovery/purge-blocked', {});
+    const rp = d.removed_probes ?? 0, rw = d.removed_warm_pool_entries ?? 0;
+    toast(`Purged ${rp} probe(s) and ${rw} warm-pool entr${rw===1?'y':'ies'}`, 'success');
+    _discAutoLoad('disc-stats', true);
   } catch(e) { toast(e.message, 'error'); }
 }
 

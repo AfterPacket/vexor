@@ -67,46 +67,73 @@ REM ── Open browser once server is ready (polls /health up to 60s) ───
 start "" powershell -NoProfile -Command "for($i=0;$i-lt60;$i++){try{$r=Invoke-WebRequest -Uri 'http://localhost:8080/health' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop;if($r.StatusCode-eq 200){Start-Process 'http://localhost:8080/';break}}catch{};Start-Sleep 1}"
 
 REM ── Launch options ────────────────────────────────────────────────────────────
-REM   (default)       dev mode  - auto-reload on file change
+REM   (default)       dev mode  - auto-reload on file change, no auto-restart
 REM   --no-reload     stable    - no auto-reload, best for long scans
-REM   --no-restart    single    - do not auto-restart on crash
-REM   --no-reload --no-restart  - stable single-run
+REM   --restart       resilient - relaunch automatically if the server CRASHES
+REM   Flags may be given in any order.  --no-restart is accepted for
+REM   backwards compatibility and is now the default.
 
-set UVICORN_CMD=uvicorn main:app --host 127.0.0.1 --port 8080
-if "%~1"=="--no-reload" set UVICORN_CMD=uvicorn main:app --host 127.0.0.1 --port 8080
-if NOT "%~1"=="--no-reload" set UVICORN_CMD=uvicorn main:app --reload --host 127.0.0.1 --port 8080
+REM Auto-restart is opt-in: a restart loop cannot fix a hung server, it only
+REM scrolls the real error off screen and makes Ctrl+C respawn the process.
+set RELOAD_FLAG=--reload
+set AUTO_RESTART=0
 
-REM Check for --no-restart flag (either arg position)
-set AUTO_RESTART=1
-if "%~1"=="--no-restart" set AUTO_RESTART=0
-if "%~2"=="--no-restart" set AUTO_RESTART=0
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="--no-reload"  set RELOAD_FLAG=
+if /i "%~1"=="--restart"    set AUTO_RESTART=1
+if /i "%~1"=="--no-restart" set AUTO_RESTART=0
+shift
+goto parse_args
+:args_done
 
-if "%~1"=="--no-reload" (
-    echo [*] Running in stable mode ^(auto-reload disabled^)
-) else (
+set UVICORN_CMD=uvicorn main:app %RELOAD_FLAG% --host 127.0.0.1 --port 8080
+
+if defined RELOAD_FLAG (
     echo [*] Running in dev mode ^(auto-reload on file change - use --no-reload for long scans^)
+) else (
+    echo [*] Running in stable mode ^(auto-reload disabled^)
 )
 if "%AUTO_RESTART%"=="1" (
-    echo [*] Auto-restart enabled ^(use --no-restart to disable^)
+    echo [*] Auto-restart enabled - will relaunch on crash ^(max 5 times^)
 ) else (
-    echo [*] Auto-restart disabled - single run
+    echo [*] Auto-restart disabled - single run ^(use --restart to enable^)
 )
 echo.
 
 REM ── Server loop ───────────────────────────────────────────────────────────────
+set RESTARTS=0
+
 :server_loop
 %UVICORN_CMD%
+set EXIT_CODE=%ERRORLEVEL%
 
+REM Exit code 0 means a clean shutdown (Ctrl+C, SIGTERM).  Never relaunch
+REM after one -- that is what made Ctrl+C respawn the server forever.
+if "%EXIT_CODE%"=="0"    goto done
 if "%AUTO_RESTART%"=="0" goto done
 
+set /a RESTARTS+=1
+if %RESTARTS% GEQ 5 goto give_up
+
 echo.
-echo [!] Server stopped or crashed. Restarting in 3 seconds...
-echo     ^(Close this window or press Ctrl+C to exit^)
+echo [!] Server crashed ^(exit code %EXIT_CODE%^). Restart %RESTARTS% of 5 in 3 seconds...
+echo     ^(Press Ctrl+C now to stop^)
 echo.
 timeout /t 3 /nobreak >nul
 goto server_loop
 
+:give_up
+echo.
+echo [!] Server crashed 5 times in a row - giving up so the error stays visible.
+echo     Scroll up for the traceback, or rerun with --no-reload for long scans.
+goto done
+
 :done
 echo.
-echo [*] Vexor stopped.
+if "%EXIT_CODE%"=="0" (
+    echo [*] Vexor stopped cleanly.
+) else (
+    echo [*] Vexor stopped ^(exit code %EXIT_CODE%^).
+)
 pause

@@ -26,7 +26,18 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from core.failure_classifier import ClassificationResult, FailureClass
+from core.failure_classifier import ClassificationResult, DefenseType, FailureClass
+
+
+# Defense types that represent a pre-response safety guard block or a
+# fallback/escalation to a stronger model.  These are NOT useful attack
+# signal: promoting them into the warm pool or effective-prompts DB poisons
+# the self-learning ('enrichment') pipeline, so they must never be enriched
+# regardless of any score assigned to them.
+_NON_ENRICHABLE_DEFENSES = frozenset({
+    DefenseType.GUARD_BLOCK.value,
+    DefenseType.ESCALATION.value,
+})
 
 
 _STORE_PATH    = "exploits/failure_store.json"
@@ -170,7 +181,10 @@ class FailureStore:
 
         # Only promote to warm pool if classification is confident enough;
         # low-confidence fallbacks (≤0.4) would corrupt discovery signal.
-        if classification.score >= 1 and classification.confidence > 0.4:
+        # Guard-block / escalation responses are never enriched — they are a
+        # safety block, not a bypass lead, and would poison the learning loop.
+        enrichable = classification.defense_type.value not in _NON_ENRICHABLE_DEFENSES
+        if enrichable and classification.score >= 1 and classification.confidence > 0.4:
             self._add_to_warm_pool(record)
 
         self._maybe_save()
