@@ -173,6 +173,9 @@ bypass_techniques.md
 cache/
 tmp/
 
+# Local-only workflow/testing notes (never commit)
+TESTING_WORKFLOW.md
+
 # ── Exception: Keep these important files ────────────────────────────────────
 !requirements.txt
 !setup.py
