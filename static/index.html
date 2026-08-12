@@ -2543,7 +2543,7 @@ function pollJailbreakScan(scanId) {
   let lastRenderedProbes = -1;
   let stuckPolls    = 0;
   let stoppingPolls = 0;
-  const max = 600;
+  const max = 3600;
   const STUCK_LIMIT    = 60;
   const STOPPING_LIMIT = 40;
   const timer = setInterval(async ()=>{
@@ -2556,7 +2556,7 @@ function pollJailbreakScan(scanId) {
       document.getElementById('jb-running').style.display='none';
       const liveEl = document.getElementById('jb-live-results');
       if (liveEl) liveEl.innerHTML = '<p style="color:var(--red);padding:12px">AutoPwn polling timed out — scan may still be running on the server.</p>';
-      toast('AutoPwn polling timed out after 20 minutes', 'error');
+      toast('AutoPwn polling timed out after 2 hours', 'error');
       return;
     }
     if (_jbStopping) {
@@ -2646,7 +2646,7 @@ function pollScan(scanId, inline=false) {
   let lastRenderedProbes = -1;
   let stuckPolls = 0;         // polls with no probe count change
   let stoppingPolls = 0;      // polls after stop was requested
-  const max = 600;            // 20 min absolute poll cap
+  const max = 3600;           // 2 hr absolute poll cap (matches server MAX_SCAN_SECONDS)
   const STUCK_LIMIT   = 60;   // 2 min no progress → warn
   const STOPPING_LIMIT = 40;  // 80s after stop → force-close UI
   const timer = setInterval(async ()=>{
@@ -2663,7 +2663,7 @@ function pollScan(scanId, inline=false) {
         const liveEl = document.getElementById('scan-live-results');
         if (liveEl) liveEl.innerHTML = '<p style="color:var(--red);padding:12px">Scan polling timed out — the scan may still be running on the server. Check the Reports tab.</p>';
       }
-      toast('Scan polling timed out after 20 minutes', 'error');
+      toast('Scan polling timed out after 2 hours', 'error');
       return;
     }
     // Force-close UI if stop was requested but backend hasn't confirmed cancelled
