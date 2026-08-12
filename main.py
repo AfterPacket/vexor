@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
             from core.prompt_engine import ALL_VULNS
 
             print("[*] Background warmup: initializing ModelManager...")
-            mm = _scanner._get_mm()
+            mm = await asyncio.to_thread(_scanner._get_mm)
             print("[*] Background warmup: ModelManager initialized")
 
             # Load vuln modules with timeout to prevent hanging

@@ -142,7 +142,8 @@ async def list_providers():
     live_by_provider: dict = {}
     try:
         if hasattr(mm, "discover_all_models"):
-            for prov_key, model_ids in mm.discover_all_models().items():
+            discovered = await asyncio.to_thread(mm.discover_all_models)
+            for prov_key, model_ids in discovered.items():
                 live_by_provider.setdefault(prov_key, []).extend(model_ids)
     except Exception:
         pass
@@ -150,7 +151,8 @@ async def list_providers():
     ollama_intg = getattr(mm, "integrations", {}).get("ollama")
     if ollama_intg and hasattr(ollama_intg, "get_available_models"):
         try:
-            live_by_provider.setdefault("ollama", []).extend(ollama_intg.get_available_models())
+            live_models = await asyncio.to_thread(ollama_intg.get_available_models)
+            live_by_provider.setdefault("ollama", []).extend(live_models)
         except Exception:
             pass
     result = []
@@ -198,9 +200,10 @@ async def list_models():
     loaded_providers: set = set(getattr(mm, "integrations", {}).keys())
 
     # Refresh the Ollama routing cache so newly pulled models show up immediately.
+    # Run in a thread so the sync HTTP GET doesn't block the event loop.
     if hasattr(mm, "refresh_ollama_models"):
         try:
-            mm.refresh_ollama_models()
+            await asyncio.to_thread(mm.refresh_ollama_models)
         except Exception:
             pass
 
@@ -220,7 +223,8 @@ async def list_models():
     # so new releases appear automatically.  Best-effort; failures are non-fatal.
     if hasattr(mm, "discover_all_models"):
         try:
-            for prov_key, model_ids in mm.discover_all_models().items():
+            discovered = await asyncio.to_thread(mm.discover_all_models)
+            for prov_key, model_ids in discovered.items():
                 for model_id in model_ids:
                     if model_id not in seen:
                         seen.add(model_id)
@@ -237,7 +241,8 @@ async def list_models():
     ollama_intg = getattr(mm, "integrations", {}).get("ollama")
     if ollama_intg and hasattr(ollama_intg, "get_available_models"):
         try:
-            for model_id in ollama_intg.get_available_models():
+            ollama_models = await asyncio.to_thread(ollama_intg.get_available_models)
+            for model_id in ollama_models:
                 if model_id not in seen:
                     seen.add(model_id)
                     items.append(ModelInfo(
@@ -271,7 +276,7 @@ async def refresh_models():
     refresh the Ollama routing cache.  Use this when a new model is released or
     a new model is pulled into Ollama and you want it to appear immediately."""
     mm = _get_mm()
-    discovered = mm.refresh_models()
+    discovered = await asyncio.to_thread(mm.refresh_models)
     # Count new models that weren't in the static catalogue before
     cfg = _load_config_file()
     new_ids = [mid for ids in discovered.values() for mid in ids]

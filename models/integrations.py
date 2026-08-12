@@ -1151,12 +1151,10 @@ class ModelManager:
         ollama = self.integrations.get("ollama")
         if ollama and model_name in self._ollama_models:
             return ollama
-        # For ':cloud' models not in the local cache, do a lazy refresh once --
-        # the model may have been pulled after startup and isn't cached yet.
-        if ollama and model_name.lower().endswith((":cloud", ":cloud-latest")):
-            self.refresh_ollama_models()
-            if model_name in self._ollama_models:
-                return ollama
+        # For ':cloud' models not in the local cache, rely on the background-warmup
+        # cache.  Do NOT call refresh_ollama_models() here — that makes a sync HTTP
+        # request that would block the async event loop during scans.
+        # Ollama Cloud routing below handles uncached ':cloud' models.
         # Ollama Cloud (remote): check by prefix, ':cloud' suffix, or cache.
         ollama_cloud = self.integrations.get("ollama_cloud")
         if ollama_cloud:
@@ -1167,10 +1165,9 @@ class ModelManager:
                 return ollama_cloud
             if model_name in self._ollama_cloud_models:
                 return ollama_cloud
-            # Cache miss — refresh once and re-check
-            self._refresh_ollama_cloud_models()
-            if model_name in self._ollama_cloud_models:
-                return ollama_cloud
+            # Cache miss — do NOT refresh here.  The sync HTTP call would block
+            # the async event loop.  Background warmup / discover_all_models()
+            # populates the cache; routing falls through to the heuristics below.
         # If the model has an 'ollama-cloud/' prefix but Ollama Cloud isn't
         # loaded (no OLLAMA_API_KEY) and it's NOT in the local Ollama cache,
         # return None now — don't let the last-resort Ollama fallback catch it
@@ -1182,11 +1179,9 @@ class ModelManager:
         # This prevents models like "gpt-oss:20b" being misrouted to OpenAI.
         if ollama and ":" in model_name:
             return ollama
-        # Cache miss — refresh once and re-check (handles models installed after startup)
-        if ollama and model_name not in self._ollama_models:
-            self.refresh_ollama_models()
-            if model_name in self._ollama_models:
-                return ollama
+        # Cache miss — do NOT refresh here.  The sync HTTP call (GET /api/tags)
+        # would block the async event loop.  Background warmup populates the
+        # cache; routing falls through to the prefix/org heuristics below.
         low = model_name.lower()
         for prefix, key in _PREFIX_MAP:
             if low.startswith(prefix):
