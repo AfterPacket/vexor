@@ -139,8 +139,8 @@ def is_reasoning_model(model_name: str) -> bool:
     return False
 
 def auto_max_tokens(model_name: str, base: int = 4096) -> int:
-    """Return appropriate max_tokens for a model. Reasoning models need 4x budget."""
-    return base * 4 if is_reasoning_model(model_name) else base
+    """Return appropriate max_tokens for a model. Reasoning models need extra token budget."""
+    return base * 2 if is_reasoning_model(model_name) else base
 
 
 def openai_uses_restricted_params(model_name: str) -> bool:

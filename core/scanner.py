@@ -118,8 +118,11 @@ def _provider_for_model(model: str) -> str:
 
 
 _PROBE_TIMEOUT: dict = {
-    "ollama":       300.0,  # local models can be slow on CPU
-    "ollama_cloud": 180.0,  # Ollama Cloud can be slow; increased from 60s
+    "ollama":       120.0, # local models can be slow on CPU, but 300s per
+                            # failed probe stalled scans for far too long
+    "ollama_cloud": 90.0,   # Ollama Cloud — reasoning models can be slow but
+                            # 180s wasted per failed probe made scans stall for
+                            # ~18 min before the model-level breaker tripped
     "bedrock":      120.0,
     "huggingface":  120.0,
     "openai":        30.0,
@@ -150,7 +153,9 @@ _CIRCUIT_WASTE_RATIO   = 0.9   # ≥90% wasted (error/block) & 0 bypasses → st
 # vulnerabilities with zero bypasses is a money pit — stop scanning it entirely
 # instead of burning ~8 probes per (model, vuln) pair.  Timeouts are weighted
 # more heavily because each one costs the full provider timeout window.
-_CIRCUIT_MODEL_MAX_WASTED   = 12   # total weighted wasted probes across a model's pairs
+_CIRCUIT_MODEL_MAX_WASTED   = 8    # total weighted wasted probes across a model's pairs
+                            # (was 12 — with 180s timeouts that meant ~18 min
+                            # before a consistently-failing model was skipped)
 _CIRCUIT_TIMEOUT_WEIGHT     = 2    # a timeout counts double (expensive: full timeout window)
 
 
