@@ -214,8 +214,8 @@ class OpenAIIntegration(ModelIntegrator):
         api_key = config.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY not configured")
-        self.client       = openai.OpenAI(api_key=api_key)
-        self.async_client = openai.AsyncOpenAI(api_key=api_key)
+        self.client       = openai.OpenAI(api_key=api_key, max_retries=0, timeout=60)
+        self.async_client = openai.AsyncOpenAI(api_key=api_key, max_retries=0, timeout=60)
 
     def _build_messages(self, prompt: str, system: Optional[str]) -> list:
         msgs = []
@@ -385,8 +385,8 @@ class AnthropicIntegration(ModelIntegrator):
         api_key = config.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not configured")
-        self.client       = anthropic.Anthropic(api_key=api_key)
-        self.async_client = anthropic.AsyncAnthropic(api_key=api_key)
+        self.client       = anthropic.Anthropic(api_key=api_key, max_retries=0, timeout=180)
+        self.async_client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=0, timeout=180)
 
     def _resolved(self, model: str) -> str:
         return self._MODEL_MAP.get(model, model)
@@ -506,8 +506,10 @@ class OpenAICompatIntegration(ModelIntegrator):
             raise ImportError("pip install openai")
         if not api_key:
             raise ValueError(f"{label} API key not configured")
-        self.client       = openai.OpenAI(api_key=api_key, base_url=base_url)
-        self.async_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.client       = openai.OpenAI(api_key=api_key, base_url=base_url,
+                                       max_retries=0, timeout=60)
+        self.async_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url,
+                                              max_retries=0, timeout=60)
 
     def _msgs(self, prompt: str, system: Optional[str]) -> list:
         out = []

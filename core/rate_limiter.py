@@ -49,6 +49,8 @@ PROVIDER_RPM: Dict[str, int] = {
     "cohere":      100,
     "bedrock":     20,
     "huggingface": 30,
+    "bigmodel":     60,   # Zhipu BigModel (GLM series)
+    "ollama_cloud": 60,   # Ollama Cloud — remote hosted models
     "ollama":      9999,   # local — effectively unlimited
     "custom":      30,
 }
@@ -148,6 +150,8 @@ class RateLimiterRegistry:
         "cohere":       5,
         "bedrock":      5,
         "huggingface":  5,
+        "bigmodel":     5,   # Zhipu BigModel (GLM series)
+        "ollama_cloud": 5,   # Ollama Cloud — remote hosted models
         "ollama":       3,   # local — limited by hardware
         "custom":       5,
     }

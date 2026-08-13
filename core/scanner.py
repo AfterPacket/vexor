@@ -109,6 +109,7 @@ def _provider_for_model(model: str) -> str:
     if low.startswith("mistral"):                       return "mistral"
     if low.startswith("command"):                       return "cohere"
     if low.startswith("deepseek"):                      return "deepseek"
+    if low.startswith("glm-"):                          return "bigmodel"
     if low.startswith(("anthropic.", "amazon.", "us.anthropic.")):
                                                         return "bedrock"
     if low.startswith(("meta-llama/llama-3", "mistralai/")):
@@ -123,6 +124,7 @@ _PROBE_TIMEOUT: dict = {
     "ollama_cloud": 60.0,   # Ollama Cloud — fail fast on unavailable models;
                             # reasoning models that work will still respond in <60s
                             # for an 8k-token security probe
+    "bigmodel":     60.0,   # Zhipu BigModel (GLM) — cloud API, fail fast
     "bedrock":      120.0,
     "huggingface":  120.0,
     "openai":        30.0,
