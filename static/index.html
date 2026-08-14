@@ -2437,15 +2437,53 @@ async function startScan() {
     activeScanId = r.scan_id;
     localStorage.setItem(LS_ACTIVE_SCAN, r.scan_id);
     const _stopBtnR = document.getElementById('scan-stop-btn');
-    _stopBtnR.disabled = false; _stopBtnR.textContent = '⬛ Stop'; _stopBtnR.style.opacity = ''; _stopBtnR.style.cursor = '';
-    document.getElementById('scan-progress-wrap').innerHTML = '<div class="loading"><div class="spinner"></div><span id="scan-progress-text">Initializing…</span></div><div class="progress mt8"><div class="progress-bar" id="scan-progress-bar" style="width:0%"></div></div>';
-    document.getElementById('scan-running').style.display='block';
+    if (_stopBtnR) { _stopBtnR.disabled = false; _stopBtnR.textContent = '⬛ Stop'; _stopBtnR.style.opacity = ''; _stopBtnR.style.cursor = ''; }
+    resetScanProgressWrap('Initializing…');
+    const _runningR = document.getElementById('scan-running');
+    if (_runningR) _runningR.style.display='block';
     sessionScans.push(r.scan_id);
     saveHistory();
     document.getElementById('ds-scans').textContent = sessionScans.length;
     updateRecentActivity();
     pollScan(r.scan_id, true);
   } catch(e) { toast(e.message,'error'); }
+}
+
+function hideScanRunningUI() {
+  const running = document.getElementById('scan-running');
+  if (running) running.style.display = 'none';
+  const viewBtn = document.getElementById('scan-view-btn');
+  if (viewBtn) viewBtn.style.display = 'none';
+}
+
+function hideJbRunningUI() {
+  const running = document.getElementById('jb-running');
+  if (running) running.style.display = 'none';
+  const viewBtn = document.getElementById('jb-view-btn');
+  if (viewBtn) viewBtn.style.display = 'none';
+}
+
+// #scan-progress-text and #scan-progress-bar live INSIDE #scan-progress-wrap,
+// and that wrap's innerHTML is rebuilt on scan start / resume / reconnect /
+// stop.  Every rebuild must recreate both, because the poll loop dereferences
+// them on each tick — a wrap left holding any other markup (as the stop path
+// used to leave it) turned those lookups into null and threw
+// "Cannot read properties of null (reading 'style')" on the next poll.
+// Funnelling every rebuild through this helper keeps that invariant.
+function scanProgressWrapHTML(label) {
+  return '<div class="loading"><div class="spinner"></div>'
+       + `<span id="scan-progress-text">${label}</span></div>`
+       + '<div class="progress mt8"><div class="progress-bar" id="scan-progress-bar" style="width:0%"></div></div>';
+}
+
+function resetScanProgressWrap(label, color) {
+  const wrap = document.getElementById('scan-progress-wrap');
+  if (!wrap) return;
+  wrap.innerHTML = scanProgressWrapHTML(label);
+  if (color) {
+    const t = document.getElementById('scan-progress-text');
+    if (t) t.style.color = color;
+  }
 }
 
 async function stopActiveScan() {
@@ -2455,8 +2493,7 @@ async function stopActiveScan() {
   markScanStopped(activeScanId);
   const liveEl = document.getElementById('scan-live-results');
   if (liveEl) liveEl.innerHTML = '<p style="color:var(--muted);padding:12px">Stopping scan…</p>';
-  const progressWrap = document.getElementById('scan-progress-wrap');
-  if (progressWrap) progressWrap.innerHTML = '<p style="color:var(--yellow);font-size:12px;padding:4px 0">Cancelling — waiting for in-flight probes to finish…</p>';
+  resetScanProgressWrap('Cancelling — waiting for in-flight probes to finish…', 'var(--yellow)');
   const stopBtn = document.getElementById('scan-stop-btn');
   if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopping…'; stopBtn.style.opacity = '0.4'; stopBtn.style.cursor = 'not-allowed'; }
   try {
@@ -2505,8 +2542,10 @@ async function startJailbreakScan() {
     toast(`AutoPwn started: ${r.scan_id}`, 'success');
     activeAutoPwnId = r.scan_id;
     localStorage.setItem(LS_ACTIVE_AUTOPWN, r.scan_id);
-    document.getElementById('jb-stop-btn').disabled = false;
-    document.getElementById('jb-running').style.display='block';
+    const _jbStopBtn = document.getElementById('jb-stop-btn');
+    if (_jbStopBtn) _jbStopBtn.disabled = false;
+    const _jbRun = document.getElementById('jb-running');
+    if (_jbRun) _jbRun.style.display='block';
     sessionScans.push(r.scan_id);
     saveHistory();
     document.getElementById('ds-scans').textContent = sessionScans.length;
@@ -2549,14 +2588,21 @@ function pollJailbreakScan(scanId) {
   const max = 3600;
   const STUCK_LIMIT    = 60;
   const STOPPING_LIMIT = 40;
+  // Same contract as pollScan's endPolling: every exit, including the error
+  // path, must clear activeAutoPwnId or the AutoPwn panel stays wedged.
+  const endJbPolling = ()=>{
+    clearInterval(timer);
+    activeAutoPwnId = null;
+    localStorage.removeItem(LS_ACTIVE_AUTOPWN);
+    _jbStopping   = false;
+    stoppingPolls = 0;
+    stuckPolls    = 0;
+  };
   const timer = setInterval(async ()=>{
     attempts++;
     if (attempts > max) {
-      clearInterval(timer);
-      activeAutoPwnId = null;
-      localStorage.removeItem(LS_ACTIVE_AUTOPWN);
-      _jbStopping = false;
-      document.getElementById('jb-running').style.display='none';
+      endJbPolling();
+      hideJbRunningUI();
       const liveEl = document.getElementById('jb-live-results');
       if (liveEl) liveEl.innerHTML = '<p style="color:var(--red);padding:12px">AutoPwn polling timed out — scan may still be running on the server.</p>';
       toast('AutoPwn polling timed out after 2 hours', 'error');
@@ -2565,12 +2611,8 @@ function pollJailbreakScan(scanId) {
     if (_jbStopping) {
       stoppingPolls++;
       if (stoppingPolls >= STOPPING_LIMIT) {
-        clearInterval(timer);
-        activeAutoPwnId = null;
-        localStorage.removeItem(LS_ACTIVE_AUTOPWN);
-        _jbStopping = false;
-        document.getElementById('jb-running').style.display='none';
-        document.getElementById('jb-view-btn').style.display='none';
+        endJbPolling();
+        hideJbRunningUI();
         const liveEl = document.getElementById('jb-live-results');
         if (liveEl) liveEl.innerHTML = '<p style="color:var(--yellow);padding:12px">AutoPwn stop requested — backend may still be winding down.</p>';
         toast('AutoPwn stop confirmed (UI closed)', 'info');
@@ -2582,16 +2624,20 @@ function pollJailbreakScan(scanId) {
       _jbLastData = r;
       if (!_jbStopping) {
         const pct = r.progress || 0;
-        document.getElementById('jb-progress-bar').style.width = pct+'%';
+        const jbBar = document.getElementById('jb-progress-bar');
+        if (jbBar) jbBar.style.width = pct+'%';
         const errSummary = r.errors && r.errors.length ? ` ⚠ ${r.errors[0].substring(0,80)}` : '';
-        document.getElementById('jb-progress-text').textContent =
-          `${r.status} — ${pct}% (${r.total_probes||0} probes, ${r.bypasses||0} bypasses found)${errSummary}`;
-        if (r.errors && r.errors.length)
-          document.getElementById('jb-progress-text').style.color = 'var(--red, #f87171)';
+        const jbTxt = document.getElementById('jb-progress-text');
+        if (jbTxt) {
+          jbTxt.textContent =
+            `${r.status} — ${pct}% (${r.total_probes||0} probes, ${r.bypasses||0} bypasses found)${errSummary}`;
+          if (r.errors && r.errors.length) jbTxt.style.color = 'var(--red, #f87171)';
+        }
       }
       // Show View Results button as soon as we have probe data
       const hasData = r.total_probes > 0 && r.results && Object.keys(r.results).length > 0;
-      if (!_jbStopping) document.getElementById('jb-view-btn').style.display = hasData ? '' : 'none';
+      const jbViewBtn = document.getElementById('jb-view-btn');
+      if (!_jbStopping && jbViewBtn) jbViewBtn.style.display = hasData ? '' : 'none';
       // Re-render live partial results if probe count changed
       if (!_jbStopping && hasData && r.total_probes !== lastRenderedProbes) {
         lastRenderedProbes = r.total_probes;
@@ -2605,16 +2651,11 @@ function pollJailbreakScan(scanId) {
         }
       }
       if (r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled') {
-        clearInterval(timer);
-        activeAutoPwnId = null;
-        localStorage.removeItem(LS_ACTIVE_AUTOPWN);
-        _jbStopping    = false;
-        stoppingPolls  = 0;
-        stuckPolls     = 0;
-        document.getElementById('jb-running').style.display='none';
-        document.getElementById('jb-view-btn').style.display='none';
+        endJbPolling();
+        hideJbRunningUI();
+        const jbLive = document.getElementById('jb-live-results');
         if (r.status !== 'cancelled') {
-          renderScanResults(r, document.getElementById('jb-live-results'));
+          if (jbLive) renderScanResults(r, jbLive);
           saveAutoPwnResult(r);
           renderAutoPwnHistory();
         }
@@ -2626,7 +2667,12 @@ function pollJailbreakScan(scanId) {
         toast(msg, r.status === 'cancelled' ? 'info' : r.errors && r.errors.length ? 'error' : 'success');
         updateRecentActivity();
       }
-    } catch(e) { clearInterval(timer); toast('AutoPwn poll error: '+e.message, 'error'); }
+    } catch(e) {
+      // Release state before surfacing the error — see endPolling in pollScan.
+      endJbPolling();
+      hideJbRunningUI();
+      toast('AutoPwn poll error: '+e.message, 'error');
+    }
   }, 2000);
 }
 
@@ -2652,17 +2698,25 @@ function pollScan(scanId, inline=false) {
   const max = 3600;           // 2 hr absolute poll cap (matches server MAX_SCAN_SECONDS)
   const STUCK_LIMIT   = 60;   // 2 min no progress → warn
   const STOPPING_LIMIT = 40;  // 80s after stop → force-close UI
+  // Every exit from the poll loop — normal finish, cap, force-close, AND error —
+  // has to release the scan-active state.  Leaving activeScanId set makes
+  // startScan refuse with "Another scan is already active", which is how a
+  // single failed poll used to lock the user out of starting anything else.
+  const endPolling = ()=>{
+    clearInterval(timer);
+    delete scanPollTimers[scanId];
+    if (scanId === activeScanId) activeScanId = null;
+    localStorage.removeItem(LS_ACTIVE_SCAN);
+    _scanStopping = false;
+    stoppingPolls = 0;
+    stuckPolls    = 0;
+  };
   const timer = setInterval(async ()=>{
     attempts++;
     if (attempts > max) {
-      clearInterval(timer);
-      delete scanPollTimers[scanId];
-      if (scanId === activeScanId) activeScanId = null;
-      localStorage.removeItem(LS_ACTIVE_SCAN);
-      _scanStopping = false;
+      endPolling();
       if (inline) {
-        document.getElementById('scan-running').style.display='none';
-        document.getElementById('scan-view-btn').style.display='none';
+        hideScanRunningUI();
         const liveEl = document.getElementById('scan-live-results');
         if (liveEl) liveEl.innerHTML = '<p style="color:var(--red);padding:12px">Scan polling timed out — the scan may still be running on the server. Check the Reports tab.</p>';
       }
@@ -2673,14 +2727,9 @@ function pollScan(scanId, inline=false) {
     if (_scanStopping) {
       stoppingPolls++;
       if (stoppingPolls >= STOPPING_LIMIT) {
-        clearInterval(timer);
-        delete scanPollTimers[scanId];
-        if (scanId === activeScanId) activeScanId = null;
-        localStorage.removeItem(LS_ACTIVE_SCAN);
-        _scanStopping = false;
+        endPolling();
         if (inline) {
-          document.getElementById('scan-running').style.display='none';
-          document.getElementById('scan-view-btn').style.display='none';
+          hideScanRunningUI();
           const liveEl = document.getElementById('scan-live-results');
           if (liveEl) liveEl.innerHTML = '<p style="color:var(--yellow);padding:12px">Scan stop requested — backend may still be finishing in-flight probes. Results will appear in Reports when complete.</p>';
         }
@@ -2695,11 +2744,13 @@ function pollScan(scanId, inline=false) {
       // Show partial results live as probes complete
       if (inline && !_scanStopping) {
         const hasData = r.total_probes > 0 && r.results && Object.keys(r.results).length > 0;
-        document.getElementById('scan-view-btn').style.display = hasData ? '' : 'none';
+        const viewBtn = document.getElementById('scan-view-btn');
+        if (viewBtn) viewBtn.style.display = hasData ? '' : 'none';
         if (hasData && r.total_probes !== lastRenderedProbes) {
           lastRenderedProbes = r.total_probes;
           stuckPolls = 0;
-          renderScanResults(r, document.getElementById('scan-live-results'));
+          const liveEl = document.getElementById('scan-live-results');
+          if (liveEl) renderScanResults(r, liveEl);
         } else if (hasData) {
           stuckPolls++;
           if (stuckPolls === STUCK_LIMIT) {
@@ -2709,19 +2760,12 @@ function pollScan(scanId, inline=false) {
         }
       }
       if (r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled') {
-        clearInterval(timer);
-        delete scanPollTimers[scanId];
-        if (scanId === activeScanId) activeScanId = null;
-        localStorage.removeItem(LS_ACTIVE_SCAN);
-        _scanStopping  = false;
-        stoppingPolls  = 0;
-        stuckPolls     = 0;
+        endPolling();
         if (r.status === 'completed') cacheScanResult(r);
         if (inline) {
-          document.getElementById('scan-running').style.display='none';
-          document.getElementById('scan-view-btn').style.display='none';
-          if (r.status !== 'cancelled')
-            renderScanResults(r, document.getElementById('scan-live-results'));
+          hideScanRunningUI();
+          const liveEl = document.getElementById('scan-live-results');
+          if (r.status !== 'cancelled' && liveEl) renderScanResults(r, liveEl);
         }
         const msg = r.status === 'cancelled'
           ? `Scan cancelled (${r.total_probes||0} probes completed)`
@@ -2732,14 +2776,22 @@ function pollScan(scanId, inline=false) {
         updateRecentActivity();
       }
     } catch(e) {
-      clearInterval(timer);
+      // Release the scan-active state BEFORE anything that could throw again,
+      // so a failure in the recovery path still leaves the UI usable.
+      endPolling();
+      if (inline) hideScanRunningUI();
       // Try local cache before giving up
-      const cached = getScanCache()[scanId];
-      if (cached) {
-        _scanLastData = cached;
-        if (inline) renderScanResults(cached, document.getElementById('scan-live-results'));
-        toast(`Server restarted — showing cached results for ${scanId.substring(0,8)}…`, 'info');
-      } else {
+      try {
+        const cached = getScanCache()[scanId];
+        const liveEl = inline ? document.getElementById('scan-live-results') : null;
+        if (cached) {
+          _scanLastData = cached;
+          if (liveEl) renderScanResults(cached, liveEl);
+          toast(`Server restarted — showing cached results for ${scanId.substring(0,8)}…`, 'info');
+        } else {
+          toast('Scan poll error: '+e.message, 'error');
+        }
+      } catch(inner) {
         toast('Scan poll error: '+e.message, 'error');
       }
     }
@@ -2749,9 +2801,14 @@ function pollScan(scanId, inline=false) {
 
 function updateInlineScanStatus(r) {
   const pct = r.progress || 0;
-  document.getElementById('scan-progress-bar').style.width = pct+'%';
+  // Both lookups are null-checked: the wrap these live in is rebuilt on stop /
+  // resume / reconnect, and a status update racing that rebuild must not throw
+  // out of the poll tick (that used to strand activeScanId and wedge the UI).
+  const bar = document.getElementById('scan-progress-bar');
+  if (bar) bar.style.width = pct+'%';
   const errSummary = r.errors && r.errors.length ? ` ⚠ ${r.errors[0].substring(0,80)}` : '';
   const el = document.getElementById('scan-progress-text');
+  if (!el) return;
   el.textContent = `${r.status} — ${pct}% (${r.total_probes||0} probes, ${r.bypasses||0} bypasses)${errSummary}`;
   if (r.errors && r.errors.length) el.style.color = 'var(--red, #f87171)';
 }
@@ -3080,9 +3137,12 @@ function reconnectToAutoPwn(scanId) {
   if (activeAutoPwnId === scanId) { toast('Already connected', 'info'); return; }
   activeAutoPwnId = scanId;
   localStorage.setItem(LS_ACTIVE_AUTOPWN, scanId);
-  document.getElementById('jb-stop-btn').disabled = false;
-  document.getElementById('jb-running').style.display = 'block';
-  document.getElementById('jb-progress-text').textContent = 'Reconnecting…';
+  const jbStop = document.getElementById('jb-stop-btn');
+  if (jbStop) jbStop.disabled = false;
+  const jbRun = document.getElementById('jb-running');
+  if (jbRun) jbRun.style.display = 'block';
+  const jbTxt = document.getElementById('jb-progress-text');
+  if (jbTxt) jbTxt.textContent = 'Reconnecting…';
   pollJailbreakScan(scanId);
   document.querySelector('[data-section="scan"]').click();
   setTimeout(() => document.querySelector('[data-tab="scan-jailbreak"]').click(), 50);
@@ -3093,9 +3153,13 @@ function reconnectToScan(scanId) {
   if (activeScanId === scanId) { toast('Already connected', 'info'); return; }
   activeScanId = scanId;
   localStorage.setItem(LS_ACTIVE_SCAN, scanId);
-  document.getElementById('scan-stop-btn').disabled = false;
-  document.getElementById('scan-running').style.display = 'block';
-  document.getElementById('scan-progress-text').textContent = 'Reconnecting…';
+  const stopBtn = document.getElementById('scan-stop-btn');
+  if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = '⬛ Stop'; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; }
+  // Rebuild the wrap rather than just setting the text: a previous stop
+  // replaced its contents, so #scan-progress-text may not exist right now.
+  resetScanProgressWrap('Reconnecting…');
+  const running = document.getElementById('scan-running');
+  if (running) running.style.display = 'block';
   pollScan(scanId, true);
   document.querySelector('[data-section="scan"]').click();
   setTimeout(() => document.querySelector('[data-tab="scan-new"]').click(), 50);
@@ -3115,8 +3179,9 @@ async function resumeScanById(scanId) {
     if (!sessionScans.includes(scanId)) { sessionScans.push(scanId); saveHistory(); }
     const stopBtn = document.getElementById('scan-stop-btn');
     if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = '⬛ Stop'; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; }
-    document.getElementById('scan-progress-wrap').innerHTML = '<div class="loading"><div class="spinner"></div><span id="scan-progress-text">Resuming…</span></div><div class="progress mt8"><div class="progress-bar" id="scan-progress-bar" style="width:0%"></div></div>';
-    document.getElementById('scan-running').style.display = 'block';
+    resetScanProgressWrap('Resuming…');
+    const running = document.getElementById('scan-running');
+    if (running) running.style.display = 'block';
     document.querySelector('[data-section="scan"]').click();
     setTimeout(() => document.querySelector('[data-tab="scan-new"]').click(), 50);
     pollScan(scanId, true);
@@ -4715,8 +4780,19 @@ async function init() {
   loadHistory();        // restore scan IDs from localStorage before anything renders
   loadAutoPwnHistory(); // restore AutoPwn result history
   await checkStatus();
-  await Promise.all([loadModels(), loadOverrides(), loadVulns(), loadComplexityLevels(), loadChainGoals()]);
-  await Promise.all([loadApiStatus(), loadImportStats(), loadMutationTechniques(), loadProviders()]);
+  // allSettled, not all: these are independent loaders, and one rejecting used
+  // to abort the whole of init() — skipping every render below, which left
+  // panels like the synthetic-data model checklist empty and unusable.
+  // A single dead provider endpoint should not take down the rest of the UI.
+  const _settled = [
+    ...await Promise.allSettled([loadModels(), loadOverrides(), loadVulns(), loadComplexityLevels(), loadChainGoals()]),
+    ...await Promise.allSettled([loadApiStatus(), loadImportStats(), loadMutationTechniques(), loadProviders()]),
+  ];
+  const _failed = _settled.filter(s => s.status === 'rejected');
+  if (_failed.length) {
+    console.warn('[init] %d loader(s) failed:', _failed.length, _failed.map(f => f.reason));
+    toast(`${_failed.length} panel(s) failed to load — some lists may be empty`, 'error');
+  }
   renderInjModelChecklist();
   renderJbModelChecklist();
   renderJbVulnChecklist();
@@ -4737,9 +4813,12 @@ async function init() {
   function _attachAutoPwn(id, r) {
     activeAutoPwnId = id;
     localStorage.setItem(LS_ACTIVE_AUTOPWN, id);
-    document.getElementById('jb-stop-btn').disabled = false;
-    document.getElementById('jb-running').style.display = 'block';
-    document.getElementById('jb-progress-text').textContent = `Reconnected — ${r.progress||0}% (${r.total_probes||0} probes)`;
+    const jbStop = document.getElementById('jb-stop-btn');
+    if (jbStop) jbStop.disabled = false;
+    const jbRun = document.getElementById('jb-running');
+    if (jbRun) jbRun.style.display = 'block';
+    const jbTxt = document.getElementById('jb-progress-text');
+    if (jbTxt) jbTxt.textContent = `Reconnected — ${r.progress||0}% (${r.total_probes||0} probes)`;
     pollJailbreakScan(id);
     document.querySelector('[data-section="scan"]').click();
     setTimeout(() => document.querySelector('[data-tab="scan-jailbreak"]').click(), 50);
@@ -4764,9 +4843,11 @@ async function init() {
       const r = await GET(`/api/scan/${resumeScan}`);
       if (r.status === 'running' || r.status === 'pending') {
         activeScanId = resumeScan;
-        document.getElementById('scan-stop-btn').disabled = false;
-        document.getElementById('scan-running').style.display = 'block';
-        document.getElementById('scan-progress-text').textContent = `Reconnected — ${r.progress||0}% (${r.total_probes||0} probes)`;
+        const _sb = document.getElementById('scan-stop-btn');
+        if (_sb) _sb.disabled = false;
+        resetScanProgressWrap(`Reconnected — ${r.progress||0}% (${r.total_probes||0} probes)`);
+        const _sr = document.getElementById('scan-running');
+        if (_sr) _sr.style.display = 'block';
         pollScan(resumeScan, true);
         toast(`Reconnected to scan ${resumeScan.substring(0,8)}…`, 'info');
       } else {
@@ -4776,7 +4857,12 @@ async function init() {
   }
 }
 
-init();
+// Surface an init failure instead of losing it to an unhandled rejection —
+// a silent throw here leaves half-wired panels with no visible explanation.
+init().catch(e => {
+  console.error('[init] failed:', e);
+  toast('UI initialisation failed: ' + (e && e.message ? e.message : e), 'error');
+});
 setInterval(checkStatus, 30000);
 </script>
 </body>
