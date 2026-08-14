@@ -88,6 +88,14 @@ _CATALOGUE = [
     ("glm-4-flash",                   "bigmodel"),
     ("glm-4-plus",                    "bigmodel"),
     ("glm-z1-flash",                   "bigmodel"),
+    # OpenRouter — the 'openrouter/' prefix is required so these are not
+    # confused with the same model IDs served by Together / HuggingFace.
+    # The full catalogue is discovered live from /v1/models.
+    ("openrouter/anthropic/claude-sonnet-4.5",      "openrouter"),
+    ("openrouter/openai/gpt-4o",                    "openrouter"),
+    ("openrouter/google/gemini-2.0-flash-001",      "openrouter"),
+    ("openrouter/meta-llama/llama-3.3-70b-instruct","openrouter"),
+    ("openrouter/deepseek/deepseek-r1",             "openrouter"),
     # Ollama Cloud — common cloud-proxied models (also discovered live)
     ("ollama-cloud/glm-5.2:cloud",         "ollama_cloud"),
     ("ollama-cloud/glm-5.1:cloud",         "ollama_cloud"),
@@ -114,6 +122,7 @@ _PROVIDER_ENV_KEYS = {
     "bedrock":     "AWS_ACCESS_KEY_ID",
     "huggingface": "HUGGINGFACE_API_KEY",
     "bigmodel":    "BIGMODEL_API_KEY",
+    "openrouter":  "OPENROUTER_API_KEY",
     "ollama":      None,  # no key required
     "ollama_cloud": "OLLAMA_API_KEY",  # Ollama Cloud uses the same key
     "custom":      None,  # key configured per-model in model_config.json

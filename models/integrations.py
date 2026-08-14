@@ -26,6 +26,7 @@ Providers:
   AWS Bedrock    — anthropic.claude-*, amazon.titan-*, etc.
   HuggingFace    — meta-llama/Meta-Llama-3-8B-Instruct, etc.
   Ollama         — local models via http://localhost:11434
+  OpenRouter     — openrouter/<org>/<model>, e.g. openrouter/anthropic/claude-sonnet-4.5
   Custom API     — any OpenAI-compatible endpoint
 """
 
@@ -500,16 +501,26 @@ class GoogleIntegration(ModelIntegrator):
 class OpenAICompatIntegration(ModelIntegrator):
     """Re-uses the OpenAI SDK with a custom base_url."""
 
-    def __init__(self, config: Dict, base_url: str, api_key: str, label: str):
+    def __init__(self, config: Dict, base_url: str, api_key: str, label: str,
+                 default_headers: Optional[Dict[str, str]] = None):
         super().__init__(config)
         if not OPENAI_AVAILABLE:
             raise ImportError("pip install openai")
         if not api_key:
             raise ValueError(f"{label} API key not configured")
         self.client       = openai.OpenAI(api_key=api_key, base_url=base_url,
-                                       max_retries=0, timeout=60)
+                                       max_retries=0, timeout=60,
+                                       default_headers=default_headers)
         self.async_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url,
-                                              max_retries=0, timeout=60)
+                                              max_retries=0, timeout=60,
+                                              default_headers=default_headers)
+
+    def _clean_name(self, model_name: str) -> str:
+        """Vexor routing name → the bare model ID the API expects.
+
+        Identity by default; overridden by providers whose model names carry a
+        Vexor-only routing prefix ('ollama-cloud/', 'openrouter/')."""
+        return model_name
 
     def _msgs(self, prompt: str, system: Optional[str]) -> list:
         out = []
@@ -526,7 +537,7 @@ class OpenAICompatIntegration(ModelIntegrator):
     ) -> str:
         def _call():
             resp = self.client.chat.completions.create(
-                model=model_name,
+                model=self._clean_name(model_name),
                 messages=self._msgs(prompt, system),
                 max_tokens=auto_max_tokens(model_name),
                 temperature=0.7,
@@ -542,7 +553,7 @@ class OpenAICompatIntegration(ModelIntegrator):
     ) -> str:
         async def _call():
             resp = await self.async_client.chat.completions.create(
-                model=model_name,
+                model=self._clean_name(model_name),
                 messages=self._msgs(prompt, system),
                 max_tokens=auto_max_tokens(model_name),
                 temperature=0.7,
@@ -627,6 +638,64 @@ class MistralIntegration(OpenAICompatIntegration):
             base_url="https://api.mistral.ai/v1",
             api_key=config.get("mistral_api_key") or os.getenv("MISTRAL_API_KEY") or "",
             label="Mistral")
+
+
+class OpenRouterIntegration(OpenAICompatIntegration):
+    """OpenRouter — OpenAI-compatible aggregator at openrouter.ai.
+
+    OpenRouter model IDs are '<org>/<model>' ('anthropic/claude-sonnet-4.5')
+    and may carry a variant suffix ('deepseek/deepseek-r1:free').  Both forms
+    collide with existing routing heuristics — the slash reads as a Together /
+    HuggingFace org pattern, the colon as a local Ollama 'name:tag' — so Vexor
+    namespaces them with an 'openrouter/' prefix that is stripped here before
+    the request goes out.
+    """
+
+    def __init__(self, config: Dict):
+        # HTTP-Referer / X-Title are OpenRouter's optional app-attribution
+        # headers (they drive its public leaderboard).  Only sent when the
+        # operator opts in by setting them.
+        headers: Dict[str, str] = {}
+        site  = config.get("openrouter_site_url") or os.getenv("OPENROUTER_SITE_URL")
+        title = config.get("openrouter_app_name") or os.getenv("OPENROUTER_APP_NAME")
+        if site:
+            headers["HTTP-Referer"] = site
+        if title:
+            headers["X-Title"] = title
+        super().__init__(config,
+            base_url=(config.get("openrouter_base_url")
+                      or os.getenv("OPENROUTER_BASE_URL")
+                      or "https://openrouter.ai/api/v1"),
+            api_key=config.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY") or "",
+            label="OpenRouter",
+            default_headers=headers or None)
+
+    def _clean_name(self, model_name: str) -> str:
+        """Strip the openrouter/ routing prefix, leaving '<org>/<model>'.
+
+        Only strips when the remainder is still an '<org>/<model>' pair, because
+        OpenRouter also serves models under its own 'openrouter' org — its
+        auto-routers ('openrouter/auto', 'openrouter/free', …).  Stripping those
+        blindly would send a bare 'auto' upstream.  Every real OpenRouter ID
+        contains a slash, so the remaining-slash test separates the two cases:
+        'openrouter/anthropic/claude-x' → 'anthropic/claude-x', while a bare
+        'openrouter/auto' is left intact and 'openrouter/openrouter/auto'
+        correctly reduces to 'openrouter/auto'.
+        """
+        for p in ("openrouter/", "openrouter:"):
+            if model_name.lower().startswith(p):
+                rest = model_name[len(p):]
+                return rest if "/" in rest else model_name
+        return model_name
+
+    def discover_models(self) -> List[str]:
+        """List models from GET /v1/models, prefixed with 'openrouter/' so a
+        shared ID like 'meta-llama/llama-3.3-70b-instruct' is unambiguous
+        against the same model served by Together or HuggingFace."""
+        try:
+            return [f"openrouter/{i}" for i in super().discover_models()]
+        except Exception:
+            return []
 
 
 # ── Cohere ────────────────────────────────────────────────────────────────────
@@ -826,40 +895,6 @@ class OllamaCloudIntegration(OpenAICompatIntegration):
         """Strip the ollama-cloud/ prefix so the API receives the bare model ID."""
         return model_name.replace("ollama-cloud/", "").replace("ollama-cloud:", "")
 
-    def send_prompt_with_system(
-        self, prompt: str, model_name: str, system: Optional[str] = None
-    ) -> str:
-        clean = self._clean_name(model_name)
-        def _call():
-            resp = self.client.chat.completions.create(
-                model=clean,
-                messages=self._msgs(prompt, system),
-                max_tokens=auto_max_tokens(model_name),
-                temperature=0.7,
-            )
-            return (resp.choices[0].message.content or "").strip()
-        try:
-            return _retry_sync(_call)
-        except Exception as e:
-            return f"Error: {e}"
-
-    async def send_prompt_async(
-        self, prompt: str, model_name: str, system: Optional[str] = None
-    ) -> str:
-        clean = self._clean_name(model_name)
-        async def _call():
-            resp = await self.async_client.chat.completions.create(
-                model=clean,
-                messages=self._msgs(prompt, system),
-                max_tokens=auto_max_tokens(model_name),
-                temperature=0.7,
-            )
-            return (resp.choices[0].message.content or "").strip()
-        try:
-            return await _retry_async(_call)
-        except Exception as e:
-            return f"Error: {e}"
-
     def discover_models(self) -> List[str]:
         """List models from Ollama Cloud via GET /v1/models, prefixed with
         'ollama-cloud/' so routing works correctly."""
@@ -1025,6 +1060,8 @@ _PREFIX_MAP = [
     ("meta-llama/meta-llama","huggingface"),
     # BigModel / Zhipu AI GLM
     ("glm",                  "bigmodel"),
+    # OpenRouter (aggregator) — 'openrouter/<org>/<model>'
+    ("openrouter",           "openrouter"),
     # Ollama Cloud (remote)
     ("ollama-cloud",         "ollama_cloud"),
     # Ollama (local) — keep last; the live-model check in _resolve handles tags
@@ -1103,6 +1140,8 @@ class ModelManager:
             self._try_init("huggingface", HuggingFaceIntegration, cfg)
         if cfg.get("bigmodel_api_key")     or os.getenv("BIGMODEL_API_KEY"):
             self._try_init("bigmodel",    BigModelIntegration,    cfg)
+        if cfg.get("openrouter_api_key")   or os.getenv("OPENROUTER_API_KEY"):
+            self._try_init("openrouter",  OpenRouterIntegration,  cfg)
         if cfg.get("ollama_cloud_api_key") or os.getenv("OLLAMA_API_KEY"):
             self._try_init("ollama_cloud", OllamaCloudIntegration, cfg)
         # Ollama — no key required
@@ -1115,6 +1154,11 @@ class ModelManager:
         # 'glm-5.2:cloud' contain a colon which would misroute to local Ollama
         # without this check.  Refreshed lazily in _resolve.
         self._ollama_cloud_models: set = set()
+        # Cache live OpenRouter model names for routing, stored WITHOUT the
+        # 'openrouter/' prefix so bare IDs the user pasted from openrouter.ai
+        # ('anthropic/claude-sonnet-4.5') still resolve here instead of falling
+        # through to the HuggingFace/Ollama org-pattern fallback.
+        self._openrouter_models: set = set()
         self.refresh_ollama_models()
         if cfg.get("api_endpoints"):
             self._try_init("custom", CustomAPIIntegration, cfg)
@@ -1177,6 +1221,14 @@ class ModelManager:
         # found).  The caller gets a clear "No integration" error instead.
         if model_name.lower().startswith("ollama-cloud/"):
             return None
+        # OpenRouter: the 'openrouter/' prefix is authoritative and must be
+        # checked BEFORE the colon→Ollama rule below — OpenRouter variant IDs
+        # ('openrouter/deepseek/deepseek-r1:free') carry a colon that would
+        # otherwise be read as a local Ollama 'name:tag'.  Returning None when
+        # the provider isn't loaded (no OPENROUTER_API_KEY) gives the caller a
+        # clear "No integration" error instead of a bogus local-Ollama 404.
+        if model_name.lower().startswith(("openrouter/", "openrouter:")):
+            return self.integrations.get("openrouter")
         # Local Ollama: colon→ollama rule for "name:tag" models not in cache.
         # This prevents models like "gpt-oss:20b" being misrouted to OpenAI.
         if ollama and ":" in model_name:
@@ -1190,6 +1242,14 @@ class ModelManager:
                 intg = self.integrations.get(key)
                 if intg:
                     return intg
+        # Bare OpenRouter ID pasted from openrouter.ai ('anthropic/claude-sonnet-4.5'):
+        # route it here rather than to the org-pattern fallback below.  This runs
+        # AFTER _PREFIX_MAP so a first-party provider that is actually loaded keeps
+        # its own models — for an ID both serve ('meta-llama/llama-3.3-70b-instruct'
+        # on Together and OpenRouter), prefix with 'openrouter/' to force OpenRouter.
+        openrouter = self.integrations.get("openrouter")
+        if openrouter and model_name in self._openrouter_models:
+            return openrouter
         # Org/model pattern → HuggingFace (if loaded), else try Ollama
         if "/" in model_name:
             hf = self.integrations.get("huggingface")
@@ -1267,11 +1327,29 @@ class ModelManager:
             pass
         return self._ollama_cloud_models
 
+    def _refresh_openrouter_models(self) -> set:
+        """Re-query OpenRouter for available models and update the routing
+        cache.  Stored WITHOUT the 'openrouter/' prefix, because the cache
+        exists to resolve bare IDs — prefixed ones are routed by _resolve()
+        before it is consulted."""
+        openrouter = self.integrations.get("openrouter")
+        if not openrouter:
+            self._openrouter_models = set()
+            return self._openrouter_models
+        try:
+            ids = openrouter.discover_models() or []
+            self._openrouter_models = {
+                i[len("openrouter/"):] for i in ids if i.startswith("openrouter/")
+            }
+        except Exception:
+            pass
+        return self._openrouter_models
+
     # Integrations without a discover_models() method are skipped.
     _DISCOVERY_ORDER = [
         "openai", "anthropic", "google", "xai", "groq", "mistral",
         "together", "perplexity", "deepseek", "cohere", "huggingface",
-        "bigmodel", "ollama_cloud", "ollama",
+        "bigmodel", "openrouter", "ollama_cloud", "ollama",
     ]
 
     def discover_all_models(self) -> Dict[str, List[str]]:
@@ -1317,6 +1395,7 @@ class ModelManager:
         routing cache.  Returns the discovered map."""
         self.refresh_ollama_models()
         self._refresh_ollama_cloud_models()
+        self._refresh_openrouter_models()
         discovered = self.discover_all_models()
         try:
             cfg_path = self._config_file
@@ -1377,6 +1456,7 @@ EXAMPLE_CONFIG = {
     "deepseek_api_key":    "",
     "cohere_api_key":      "",
     "huggingface_api_key": "",
+    "openrouter_api_key":  "",
     "aws_region":          "us-east-1",
     "ollama_base_url":     "http://localhost:11434",
     "api_endpoints": {

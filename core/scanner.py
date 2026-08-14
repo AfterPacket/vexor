@@ -95,6 +95,9 @@ def _clean_api_error(raw: str) -> str:
 def _provider_for_model(model: str) -> str:
     """Map model name to provider key without importing ModelManager."""
     low = model.lower()
+    # OpenRouter first: its variant IDs ('openrouter/deepseek/deepseek-r1:free')
+    # contain a colon that the Ollama rule below would otherwise claim.
+    if low.startswith(("openrouter/", "openrouter:")):  return "openrouter"
     # Ollama Cloud must be checked before local Ollama
     if low.startswith("ollama-cloud") or ":cloud" in low:  return "ollama_cloud"
     # Ollama-first: name:tag format always means local Ollama regardless of prefix
@@ -125,6 +128,10 @@ _PROBE_TIMEOUT: dict = {
                             # reasoning models that work will still respond in <60s
                             # for an 8k-token security probe
     "bigmodel":     60.0,   # Zhipu BigModel (GLM) — cloud API, fail fast
+    "openrouter":   90.0,   # aggregator: adds a routing hop and can front slow
+                            # thinking models, so it needs more headroom than a
+                            # direct cloud provider — but less than Anthropic,
+                            # since a stalled upstream should fail the probe
     "bedrock":      120.0,
     "huggingface":  120.0,
     "openai":        30.0,

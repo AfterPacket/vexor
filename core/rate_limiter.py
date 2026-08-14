@@ -33,6 +33,7 @@ from typing import Dict, Optional
 #   Cohere:      docs.cohere.com/reference/rate-limits          (100 RPM trial)
 #   Bedrock:     docs.aws.amazon.com/bedrock/quotas             (conservative 20 RPM)
 #   HuggingFace: huggingface.co/docs/api-inference              (free = ~30 RPM)
+#   OpenRouter:  openrouter.ai/docs/api-reference/limits        (credit-tiered)
 #   Ollama:      local — no limit
 #   custom:      unknown — conservative 30 RPM
 
@@ -50,6 +51,9 @@ PROVIDER_RPM: Dict[str, int] = {
     "bedrock":     20,
     "huggingface": 30,
     "bigmodel":     60,   # Zhipu BigModel (GLM series)
+    "openrouter":   60,   # OpenRouter — credit-tier dependent; ':free' variants
+                          # are capped at 20 RPM, so lower this via
+                          # RATE_LIMIT_OPENROUTER when scanning free models
     "ollama_cloud": 60,   # Ollama Cloud — remote hosted models
     "ollama":      9999,   # local — effectively unlimited
     "custom":      30,
@@ -151,6 +155,7 @@ class RateLimiterRegistry:
         "bedrock":      5,
         "huggingface":  5,
         "bigmodel":     5,   # Zhipu BigModel (GLM series)
+        "openrouter":   8,   # OpenRouter — aggregator, fans out upstream
         "ollama_cloud": 5,   # Ollama Cloud — remote hosted models
         "ollama":       3,   # local — limited by hardware
         "custom":       5,

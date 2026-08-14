@@ -257,7 +257,8 @@ COHERE_API_KEY=...
 HUGGINGFACE_API_KEY=hf_...
 TOGETHER_API_KEY=...
 PERPLEXITY_API_KEY=pplx-...
-BIGMODEL_API_KEY=...</pre>
+BIGMODEL_API_KEY=...
+OPENROUTER_API_KEY=sk-or-v1-...</pre>
       </div>
       <div id="providers-list" class="card-grid">
         <div class="loading"><div class="spinner"></div>Loading provider status…</div>
@@ -637,6 +638,7 @@ BIGMODEL_API_KEY=...</pre>
               <option value="bedrock">bedrock</option>
               <option value="huggingface">huggingface</option>
               <option value="bigmodel">bigmodel</option>
+              <option value="openrouter">openrouter</option>
               <option value="custom">custom</option>
             </select>
             <input type="text" id="custom-model-url" placeholder="Base URL (auto-filled)" style="max-width:260px"/>
@@ -1543,6 +1545,7 @@ const PROVIDER_URLS = {
   bedrock:      '',
   huggingface:  'https://api-inference.huggingface.co/models',
   bigmodel:     'https://open.bigmodel.cn/api/paas/v4',
+  openrouter:   'https://openrouter.ai/api/v1',
   custom:       ''
 };
 
@@ -1560,7 +1563,7 @@ async function addCustomModel() {
   if (!id) { toast('Enter a model ID', 'error'); return; }
 
   // Determine payload format from provider
-  const openaiCompat = ['ollama','ollama-cloud','openai','groq','together','deepseek','mistral','perplexity','xai','bigmodel','custom'];
+  const openaiCompat = ['ollama','ollama-cloud','openai','groq','together','deepseek','mistral','perplexity','xai','bigmodel','openrouter','custom'];
   const payload_format = openaiCompat.includes(prov) ? 'openai' : prov;
 
   const payload = {
@@ -1661,7 +1664,7 @@ async function loadModels() {
 }
 
 function renderModelsTable(models) {
-  const provColors = {openai:'blue',anthropic:'purple',google:'yellow',groq:'green',mistral:'orange',cohere:'cyan',together:'blue',perplexity:'purple',deepseek:'red',bedrock:'orange',huggingface:'yellow',ollama:'green','ollama-cloud':'green',bigmodel:'cyan',xai:'red',custom:'muted'};
+  const provColors = {openai:'blue',anthropic:'purple',google:'yellow',groq:'green',mistral:'orange',cohere:'cyan',together:'blue',perplexity:'purple',deepseek:'red',bedrock:'orange',huggingface:'yellow',ollama:'green','ollama-cloud':'green',bigmodel:'cyan',openrouter:'purple',xai:'red',custom:'muted'};
   const tbody = document.getElementById('models-tbody');
   tbody.innerHTML = models.map(m=>`
     <tr>
@@ -3767,7 +3770,7 @@ function renderProviderGroupBtns(containerId, onToggle) {
   if (!el) return;
   const provColors = {openai:'blue',anthropic:'purple',google:'yellow',groq:'green',
     mistral:'orange',cohere:'cyan',together:'blue',perplexity:'purple',deepseek:'red',
-    bedrock:'orange',huggingface:'yellow',ollama:'green',bigmodel:'cyan',xai:'red',custom:'muted'};
+    bedrock:'orange',huggingface:'yellow',ollama:'green',bigmodel:'cyan',openrouter:'purple',xai:'red',custom:'muted'};
   el.innerHTML = _providerStatus.map(p=>`
     <button class="btn-ghost btn-sm"
       style="border-color:${p.loaded?'var(--green)':p.key_set?'var(--yellow)':'var(--border)'};
