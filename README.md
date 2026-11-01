@@ -42,19 +42,21 @@ Tests LLMs for prompt injection, system-prompt leakage, excessive agency, sensit
 and `test_mixed_coverage_is_partial_not_clean`); see the release audit notes.
 No paid/live provider scans were run.
 
-## What's New in v2.7.2 — Reliability and Local Startup
+## What's New in v2.7.2 — Reliability, Guardrail Handling, and Local Startup
 
-> **Release scope:** v2.7.2 is a local reliability and reporting update. It was
-> verified with offline mocks only; it does not claim live provider compatibility,
-> model availability, or a change to provider safety enforcement.
+> **Release scope:** v2.7.2 is a local reliability, reporting, and guardrail-result
+> handling update. It was verified with offline mocks only; it does not claim live
+> provider compatibility, model availability, or a change to provider safety enforcement.
 
 | Area | Change |
 |---|---|
 | **Windows startup** | `run_toolkit.bat` now validates `enum`, `venv`, and `ensurepip` before creating an environment; stops immediately on setup/install failures; and always runs pip/Uvicorn as `venv\\Scripts\\python.exe -m ...`. It no longer falls through to stale global launcher executables. |
 | **macOS/Linux startup** | `run_toolkit.sh` now has equivalent interpreter/venv validation and runs Uvicorn with the venv Python. |
 | **Broken Python guidance** | If standard-library imports fail, the launchers report that Python must be repaired/reinstalled or selected through `VEXOR_PYTHON`; they do not attempt to bootstrap from a partial embedded runtime. |
-| **Provider outcomes** | Refusals, output limits, empty output, timeouts, rate limits, unavailable models, quotas, authentication, and unsupported capabilities have distinct local result categories. A blocked request is `not_evaluated`, not clean or successful. |
-| **Fallback behavior** | Policy refusals and other terminal error outcomes stop automatic same-test mode/baseline sequences. Retries remain bounded and do not dispatch to another provider. |
+| **Provider outcomes** | Refusals, provider guard blocks, output limits, empty output, timeouts, rate limits, unavailable models, quotas, authentication, and unsupported capabilities have distinct local result categories. A blocked request is `not_evaluated`, not clean or successful. |
+| **Guardrail handling** | A provider `refusal`/content-filter outcome is preserved as an explicit blocked result rather than being mistaken for an empty response or transport error. Guard blocks are recorded as non-bypasses and excluded from discovery/template completion evidence. |
+| **Strict model routing** | `strict_model: true` is the default. Explicit `model_routes` select a provider; ambiguous or unavailable routes return a configuration error rather than silently choosing a different provider or model. Model aliases require explicit `strict_model: false` consent. |
+| **Fallback behavior** | Policy refusals and other terminal error outcomes stop automatic same-test mode/baseline sequences. Retries remain bounded, stay on the requested model for genuine parameter-compatibility errors only, and never dispatch to another provider. No retry or fallback is used to evade provider enforcement. |
 | **Evidence and discovery** | Checkpoints retain model diagnostics/evaluation state. Unevaluated results are excluded from template/discovery completion bookkeeping. Generated candidates remain unvalidated until explicit evaluation. |
 | **Scheduling** | Probe scheduling is bounded per pair and cancellation drains owned tasks. The mocked benchmark documents request multiplication in AutoPwn-style flows without making live performance claims. |
 | **Application shutdown** | The background warmup task is retained and cancelled during FastAPI lifespan shutdown/reload. |
