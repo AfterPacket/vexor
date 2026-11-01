@@ -34,6 +34,7 @@ class LLMGenerateRequest(BaseModel):
     model:          str           = Field(default="llama3.1",
                                           description="Ollama model to use for generation")
     complexity:     int           = Field(default=5, ge=1, le=10)
+    allow_rule_fallback: bool     = False
 
 
 class ExportRequest(BaseModel):
@@ -48,6 +49,7 @@ class SyntheticPromptEntry(BaseModel):
     techniques:     List[str]
     vulnerability:  str
     source:         Optional[str] = None
+    validation_status: str = "unvalidated"
 
 
 class GenerateSyntheticResponse(BaseModel):

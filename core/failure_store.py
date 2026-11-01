@@ -352,7 +352,9 @@ class FailureStore:
             if not tid:
                 continue
             if tid not in store:
-                store[tid] = t
+                store[tid] = {**t, "tested": False, "validation_status": "unvalidated",
+                              "completed_evaluations": 0, "heuristic_positive_count": 0,
+                              "validated_positive_count": 0}
                 added += 1
         self._data["synthesized_templates"] = store
         return added
@@ -366,7 +368,10 @@ class FailureStore:
     ) -> list:
         """Return synthesized templates matching filters, sorted by confidence desc."""
         out = []
-        for t in self._data["synthesized_templates"].values():
+        for stored in self._data["synthesized_templates"].values():
+            # Historical 'tested' flags had no attributable completion evidence.
+            t = {**stored, "tested": stored.get("completed_evaluations", 0) > 0,
+                 "validation_status": stored.get("validation_status", "unvalidated")}
             if t.get("confidence", 0) < min_confidence:
                 continue
             if untested_only and t.get("tested", False):
@@ -382,12 +387,26 @@ class FailureStore:
         out.sort(key=lambda t: t.get("confidence", 0), reverse=True)
         return out
 
-    def mark_template_tested(self, template_id: str, bypassed: bool = False) -> None:
+    def record_template_evaluation(self, template_id: str, *, outcome: str,
+                                   heuristic_positive: bool = False,
+                                   independently_validated: bool = False) -> None:
+        """Record an attributable terminal outcome, never a scheduled task."""
+        if outcome not in {"completed", "error", "cancelled", "inconclusive"}:
+            raise ValueError("Unknown template evaluation outcome")
         t = self._data["synthesized_templates"].get(template_id)
-        if t:
-            t["tested"] = True
-            if bypassed:
-                t["bypass_rate"] = (t.get("bypass_rate") or 0) + 1
+        if t is None:
+            return
+        key = f"{outcome}_evaluations"
+        t[key] = t.get(key, 0) + 1
+        if outcome == "completed":
+            t["heuristic_positive_count"] = t.get("heuristic_positive_count", 0) + int(heuristic_positive)
+            t["validated_positive_count"] = t.get("validated_positive_count", 0) + int(independently_validated)
+        completed = t.get("completed_evaluations", 0)
+        t["tested"] = completed > 0
+        t["validation_status"] = "validated" if t.get("validated_positive_count", 0) else "unvalidated"
+        # Retain the old key for readers, but a rate is no longer a raw count.
+        t["bypass_rate"] = t.get("heuristic_positive_count", 0) / completed if completed else None
+        self._dirty += 1
 
     # ── Accessors for MethodDiscovery ─────────────────────────────────────────
 

@@ -10,7 +10,10 @@ POST /api/synthetic/generate/llm             — use local LLM to produce novel 
 POST /api/synthetic/export                   — save generated prompts to effective_prompts.json
 """
 
+from functools import partial
 from typing import Any, Dict, List
+
+import anyio
 
 from fastapi import APIRouter, HTTPException
 
@@ -24,10 +27,11 @@ from api.schemas.synthetic import (
     LLMGenerateRequest,
     SyntheticPromptEntry,
 )
-from core.synthetic_data import SyntheticDataGenerator
+from core.synthetic_data import GenerationError, SyntheticDataGenerator
 
 router    = APIRouter()
 _gen      = SyntheticDataGenerator()
+_llm_limiter = anyio.CapacityLimiter(2)
 
 
 # ── Complexity catalogue ──────────────────────────────────────────────────────
@@ -120,21 +124,33 @@ async def generate_with_llm(req: LLMGenerateRequest):
     Use a local Ollama model to generate novel prompt variants.
     The LLM is prompted to rephrase and reframe a base prompt in
     `count` meaningfully different ways, then complexity techniques are applied.
-    Falls back to rule-based generation if Ollama is unavailable.
+    Transport-only rule-based fallback requires explicit consent.
+    Generation produces candidates, not independently validated findings.
     """
-    items = _gen.llm_generate(
-        vulnerability = req.vulnerability,
-        base_prompt   = req.base_prompt,
-        count         = req.count,
-        model         = req.model,
-        complexity    = req.complexity,
-    )
+    try:
+        # Keep synchronous HTTP off the event loop, with bounded thread usage.
+        items = await anyio.to_thread.run_sync(partial(
+            _gen.llm_generate,
+            vulnerability=req.vulnerability,
+            base_prompt=req.base_prompt,
+            count=req.count,
+            model=req.model,
+            complexity=req.complexity,
+            allow_rule_fallback=req.allow_rule_fallback,
+        ), limiter=_llm_limiter)
+    except GenerationError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
     return {
         "vulnerability": req.vulnerability,
-        "model_used":    req.model,
-        "complexity":    req.complexity,
-        "count":         len(items),
-        "prompts":       items,
+        "requested_model": items.requested_model,
+        "model_used": items.model_used,
+        "generator": items.generator,
+        "fallback_used": items.fallback_used,
+        "warning": items.warning,
+        "validation_status": "unvalidated",
+        "complexity": req.complexity,
+        "count": len(items),
+        "prompts": list(items),
     }
 
 
@@ -144,15 +160,15 @@ async def generate_with_llm(req: LLMGenerateRequest):
 async def export_to_exploits(req: ExportRequest):
     """
     Append generated prompts to exploits/effective_prompts.json.
-    The prompts will then be used automatically by future scans against
-    models matching the model_key.
+    Generated entries remain unvalidated and are excluded from automatic
+    effective-prompt selection. Explicit evaluation is required.
     """
     added = _gen.export_to_exploits(
         prompts   = req.prompts,
         model_key = req.model_key,
     )
     return {
-        "message":   f"Added {added} new prompts to effective_prompts.json",
+        "message":   f"Staged {added} unvalidated candidates; explicit evaluation is required.",
         "added":     added,
         "model_key": req.model_key,
     }

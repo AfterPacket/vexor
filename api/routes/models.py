@@ -15,6 +15,8 @@ import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from core.model_results import classify_failure, response_details
+
 from api.schemas.models import (
     ModelInfo, ModelsListResponse,
     ModelTestRequest, ModelTestResponse,
@@ -295,19 +297,32 @@ async def test_model(req: ModelTestRequest):
     start = time.time()
     try:
         response = await mm.send_prompt_async(req.prompt, req.model, req.system or None)
+        details = response_details(response)
+        outcome = details["outcome"]
+        explanations = {
+            "blocked": "Provider refused or filtered the request; no fallback was attempted.",
+            "incomplete": "Provider reached the output limit; the response is incomplete.",
+            "empty": "Provider returned no response text; inspect the completion reason.",
+        }
         return ModelTestResponse(
             model      = req.model,
             response   = response,
             latency_ms = round((time.time() - start) * 1000, 1),
-            success    = True,
+            success    = outcome == "completed",
+            error      = str(response) if outcome == "error" else explanations.get(outcome),
+            **details,
         )
     except Exception as e:
+        category = classify_failure(e)
         return ModelTestResponse(
             model      = req.model,
             response   = "",
             latency_ms = round((time.time() - start) * 1000, 1),
             success    = False,
-            error      = str(e),
+            outcome    = "blocked" if category == "policy_refusal" else "error",
+            failure_kind = category,
+            evaluation_status = "not_evaluated",
+            error      = f"Model request failed ({type(e).__name__}); inspect sanitized server diagnostics.",
         )
 
 
@@ -546,24 +561,7 @@ async def update_ollama_config(req: OllamaConfigRequest):
 
 @router.get("/{model_id:path}", response_model=ModelTestResponse)
 async def probe_model(model_id: str):
-    """Quick connectivity check — sends 'ping' and returns result."""
-    mm    = _get_mm()
-    start = time.time()
-    try:
-        response = await mm.send_prompt_async(
-            "Respond with the single word: pong", model_id
-        )
-        return ModelTestResponse(
-            model      = model_id,
-            response   = response,
-            latency_ms = round((time.time() - start) * 1000, 1),
-            success    = True,
-        )
-    except Exception as e:
-        return ModelTestResponse(
-            model      = model_id,
-            response   = "",
-            latency_ms = round((time.time() - start) * 1000, 1),
-            success    = False,
-            error      = str(e),
-        )
+    """Connectivity check using the same outcome handling as explicit tests."""
+    return await test_model(ModelTestRequest(
+        model=model_id, prompt="Respond with the single word: pong"
+    ))

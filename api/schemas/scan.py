@@ -36,7 +36,14 @@ class ScanRequest(BaseModel):
 class ProbeResultSchema(BaseModel):
     prompt:        str
     response:      str
+    response_truncated: bool = False
+    response_full_length: Optional[int] = None
+    validation_status: str = "unvalidated"
+    validation_evaluator: Optional[str] = None
+    model_diagnostics: Dict[str, Any] = Field(default_factory=dict)
+    evaluation_status: str = "not_evaluated"
     bypassed:      bool
+    heuristic_positive: bool = False
     override_mode: str
     mutation:      Optional[str]
     latency_ms:    float
@@ -47,8 +54,14 @@ class ModelVulnResultSchema(BaseModel):
     vulnerability: str
     bypass_rate:   float
     bypass_count:  int
+    confirmed_bypass_count: int = 0
+    heuristic_positive_count: int = 0
+    finding_status: str = "unvalidated"
     total_probes:  int
     vulnerable:    bool
+    evaluation_status: str = "not_evaluated"
+    evaluated_probes: int = 0
+    not_evaluated_probes: int = 0
     probes:        List[ProbeResultSchema]
 
 
@@ -69,6 +82,8 @@ class ScanStatusResponse(BaseModel):
     errors:          List[str]
     total_probes:    int = 0
     bypasses:        int = 0
+    heuristic_candidates: int = 0
+    finding_count_basis: str = "independent_validation"
     mode_stats:       List[Dict[str, Any]] = []
     results:         Dict[str, List[Dict[str, Any]]]
 

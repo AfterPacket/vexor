@@ -31,12 +31,15 @@ Providers:
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
 from typing import Any, Dict, List, Optional
 
 import requests
+
+from core.model_results import classify_failure, response_details
 
 # ── Optional SDK availability ─────────────────────────────────────────────────
 
@@ -84,9 +87,51 @@ REASONING_MODELS = {"deepseek-reasoner", "glm-5", "glm-5.1", "glm-5.2", "o1", "o
 
 # ── Retry helper ──────────────────────────────────────────────────────────────
 
+logger = logging.getLogger(__name__)
+
+
+class ModelResponse(str):
+    """String-compatible response with provider-reported, not verified, metadata."""
+
+    def __new__(cls, text, reported_model=None, finish_reason=None, *,
+                outcome=None, request_metadata=None, failure_kind=None):
+        obj = super().__new__(cls, text)
+        obj.reported_model = reported_model
+        obj.finish_reason = finish_reason
+        obj.outcome = outcome
+        obj.failure_kind = failure_kind
+        obj.request_metadata = dict(request_metadata or {})
+        return obj
+
+    @classmethod
+    def from_error(cls, error):
+        category = classify_failure(error)
+        if category == "policy_refusal":
+            return cls("[blocked] Provider rejected the request.", outcome="blocked", failure_kind=category)
+        return cls(f"Error: {error}", outcome="error", failure_kind=category)
+
+
+def _chat_result(resp):
+    choice = resp.choices[0]
+    message = choice.message
+    text = message.content or ""
+    reason = getattr(choice, "finish_reason", None)
+    blocked = bool(getattr(message, "refusal", None)) or reason == "content_filter"
+    if blocked:
+        text = ("[blocked] Provider refused or filtered the request.\n" + text).strip()
+    elif reason == "length":
+        text += "\n[incomplete] Provider reached the output token limit."
+    outcome = "blocked" if blocked else "incomplete" if reason == "length" else None
+    return ModelResponse(text.strip(), getattr(resp, "model", None), reason, outcome=outcome)
+
+
+def _is_transient_error(exc):
+    """Never retry safety, auth, context, billing, or exhausted-quota failures."""
+    return classify_failure(exc) in {"rate_limit", "service_unavailable"}
+
 async def _retry_async(coro_fn, retries: int = 3, base_delay: float = 1.0):
     """
-    Retry an async callable on transient errors (429, 503, timeout).
+    Retry an async callable on transient rate-limit/overload errors (429, 503).
     Uses exponential backoff.  Does NOT sleep on first attempt.
     """
     last_err: Exception = RuntimeError("unknown")
@@ -95,11 +140,10 @@ async def _retry_async(coro_fn, retries: int = 3, base_delay: float = 1.0):
             return await coro_fn()
         except Exception as e:
             last_err = e
-            msg = str(e).lower()
             # Retries are limited to rate-limit / temporary service overload.
             # Do NOT retry a timeout: a timed-out generation may already have
             # consumed tokens and retrying blindly multiplies scan cost.
-            if any(k in msg for k in ("429", "rate limit", "503", "overloaded")): 
+            if _is_transient_error(e):
                 if attempt < retries - 1:
                     await asyncio.sleep(base_delay * (2 ** attempt))
                 continue
@@ -115,10 +159,9 @@ def _retry_sync(fn, retries: int = 3, base_delay: float = 1.0):
             return fn()
         except Exception as e:
             last_err = e
-            msg = str(e).lower()
             # Do not retry a timeout: it can already have consumed a full
             # generation and retrying would multiply paid scan attempts.
-            if any(k in msg for k in ("429", "rate limit", "503", "overloaded")): 
+            if _is_transient_error(e):
                 if attempt < retries - 1:
                     time.sleep(base_delay * (2 ** attempt))
                 continue
@@ -252,17 +295,18 @@ class OpenAIIntegration(ModelIntegrator):
             except Exception as e:
                 # Unknown newer model that rejects temperature/max_tokens —
                 # retry once with the restricted param set.
-                if not restricted and _openai_param_error(str(e)):
+                if (not restricted and classify_failure(e) == "unsupported_capability"
+                        and _openai_param_error(str(e))):
                     resp = self.client.chat.completions.create(
                         **self._kwargs(prompt, system, model_name, True)
                     )
                 else:
                     raise
-            return (resp.choices[0].message.content or "").strip()
+            return _chat_result(resp)
         try:
             return _retry_sync(_call)
         except Exception as e:
-            return f"Error: {e}"
+            return ModelResponse.from_error(e)
 
     async def send_prompt_async(
         self, prompt: str, model_name: str, system: Optional[str] = None
@@ -274,17 +318,18 @@ class OpenAIIntegration(ModelIntegrator):
                     **self._kwargs(prompt, system, model_name, restricted)
                 )
             except Exception as e:
-                if not restricted and _openai_param_error(str(e)):
+                if (not restricted and classify_failure(e) == "unsupported_capability"
+                        and _openai_param_error(str(e))):
                     resp = await self.async_client.chat.completions.create(
                         **self._kwargs(prompt, system, model_name, True)
                     )
                 else:
                     raise
-            return (resp.choices[0].message.content or "").strip()
+            return _chat_result(resp)
         try:
             return await _retry_async(_call)
         except Exception as e:
-            return f"Error: {e}"
+            return ModelResponse.from_error(e)
 
     def discover_models(self) -> List[str]:
         """List models available to this OpenAI account via /v1/models.
@@ -346,11 +391,12 @@ def _is_claude_guard_error(err_msg: str) -> bool:
 def _claude_result(msg) -> str:
     """Response text, or an explicit marker when the guard blocked generation."""
     text = _claude_text(msg.content)
-    if text:
-        return text
-    if getattr(msg, "stop_reason", None) == "refusal":
-        return CLAUDE_GUARD_BLOCK
-    return ""
+    reason = getattr(msg, "stop_reason", None)
+    if reason == "refusal":
+        text = ("[blocked] Provider ended generation with stop_reason=refusal.\n" + text).strip() if text else CLAUDE_GUARD_BLOCK
+    elif reason == "max_tokens":
+        text += "\n[incomplete] Provider reached the output token limit."
+    return ModelResponse(text, getattr(msg, "model", None), reason)
 
 
 def _claude_text(content) -> str:
@@ -368,16 +414,6 @@ def _claude_text(content) -> str:
 
 
 class AnthropicIntegration(ModelIntegrator):
-    _MODEL_MAP = {
-        "claude-opus-4-6":   "claude-opus-4-6",
-        "claude-sonnet-4-6": "claude-sonnet-4-6",
-        "claude-haiku-4-5":  "claude-haiku-4-5",
-        "claude-3-opus":     "claude-opus-4-6",
-        "claude-3-sonnet":   "claude-sonnet-4-6",
-        "claude-3-haiku":    "claude-haiku-4-5",
-        "claude-3-5-sonnet": "claude-sonnet-4-6",
-    }
-
     def __init__(self, config: Dict):
         super().__init__(config)
         if not ANTHROPIC_AVAILABLE:
@@ -389,7 +425,9 @@ class AnthropicIntegration(ModelIntegrator):
         self.async_client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=0, timeout=180)
 
     def _resolved(self, model: str) -> str:
-        return self._MODEL_MAP.get(model, model)
+        if self.config.get("strict_model", True):
+            return model
+        return self.config.get("model_aliases", {}).get(model, model)
 
     def send_prompt(self, prompt: str, model_name: str) -> str:
         return self.send_prompt_with_system(prompt, model_name)
@@ -413,9 +451,9 @@ class AnthropicIntegration(ModelIntegrator):
         try:
             return _retry_sync(_call)
         except Exception as e:
-            if _is_claude_guard_error(str(e)):
-                return CLAUDE_GUARD_BLOCK
-            return f"Error: {e}"
+            if classify_failure(e) == "policy_refusal":
+                return ModelResponse(CLAUDE_GUARD_BLOCK, outcome="blocked", failure_kind="policy_refusal")
+            return ModelResponse.from_error(e)
 
     async def send_prompt_async(
         self, prompt: str, model_name: str, system: Optional[str] = None
@@ -435,9 +473,9 @@ class AnthropicIntegration(ModelIntegrator):
         try:
             return await _retry_async(_call)
         except Exception as e:
-            if _is_claude_guard_error(str(e)):
-                return CLAUDE_GUARD_BLOCK
-            return f"Error: {e}"
+            if classify_failure(e) == "policy_refusal":
+                return ModelResponse(CLAUDE_GUARD_BLOCK, outcome="blocked", failure_kind="policy_refusal")
+            return ModelResponse.from_error(e)
 
     def discover_models(self) -> List[str]:
         """List Claude models via the Anthropic Models API (client.models.list).
@@ -531,7 +569,7 @@ class OpenAICompatIntegration(ModelIntegrator):
                 max_tokens=auto_max_tokens(model_name),
                 temperature=0.7,
             )
-            return (resp.choices[0].message.content or "").strip()
+            return _chat_result(resp)
         try:
             return _retry_sync(_call)
         except Exception as e:
@@ -547,7 +585,7 @@ class OpenAICompatIntegration(ModelIntegrator):
                 max_tokens=auto_max_tokens(model_name),
                 temperature=0.7,
             )
-            return (resp.choices[0].message.content or "").strip()
+            return _chat_result(resp)
         try:
             return await _retry_async(_call)
         except Exception as e:
@@ -1040,6 +1078,7 @@ class ModelManager:
     def __init__(self, config_file: str = "configs/model_config.json"):
         self._config_file = config_file
         self.config       = self._load_config(config_file)
+        self._validate_routing_config()
         self.integrations: Dict[str, ModelIntegrator] = {}
         self._initialize_integrations()
 
@@ -1064,8 +1103,8 @@ class ModelManager:
             try:
                 with open(config_file) as f:
                     defaults.update(json.load(f))
-            except Exception as e:
-                print(f"[!] Config load error ({config_file}): {e}")
+            except (OSError, ValueError, TypeError) as e:
+                raise ValueError("Cannot load model configuration; refusing default routing") from e
         return defaults
 
     def _try_init(self, key: str, cls, *args):
@@ -1134,7 +1173,63 @@ class ModelManager:
                 except Exception as e:
                     print(f"[-] {pname}: {e}")
 
+    def _validate_routing_config(self):
+        strict = self.config.get("strict_model", True)
+        if not isinstance(strict, bool):
+            raise ValueError("strict_model must be a boolean")
+        for key in ("model_routes", "model_aliases"):
+            value = self.config.get(key, {})
+            if not isinstance(value, dict) or any(
+                not isinstance(k, str) or not k or not isinstance(v, str) or not v
+                for k, v in value.items()
+            ):
+                raise ValueError(f"{key} must map nonempty model IDs to nonempty strings")
+        if strict and self.config.get("model_aliases"):
+            raise ValueError("model_aliases requires explicit consent via strict_model=false")
+
+    def _required_provider(self, key):
+        intg = self.integrations.get(key)
+        if intg is None:
+            raise ValueError(f"Requested provider '{key}' is unavailable; configure its credentials/SDK. No fallback dispatched.")
+        return intg
+
+    def _resolve_strict(self, model_name):
+        low = model_name.lower()
+        for prefix, provider in (("ollama-cloud/", "ollama_cloud"), ("ollama/", "ollama"), ("ollama:", "ollama")):
+            if low.startswith(prefix):
+                return self._required_provider(provider)
+        if low.endswith((":cloud", ":cloud-latest")):
+            raise ValueError("Ambiguous cloud model: use ollama/ or ollama-cloud/ explicitly, or configure model_routes")
+        # Bedrock version suffixes also contain colons; they are not local tags.
+        for prefix, provider in _PREFIX_MAP:
+            if provider == "bedrock" and low.startswith(prefix):
+                return self._required_provider(provider)
+        if ":" in model_name and not low.startswith("ft:"):
+            return self._required_provider("ollama")
+        for prefix, provider in _PREFIX_MAP:
+            if low.startswith(prefix):
+                return self._required_provider(provider)
+        if model_name in self._ollama_models:
+            return self._required_provider("ollama")
+        raise ValueError("Unknown model route; configure model_routes or use an explicit ollama/ prefix. No fallback dispatched.")
+
     def _resolve(self, model_name: str) -> Optional[ModelIntegrator]:
+        self._validate_routing_config()
+        route = self.config.get("model_routes", {}).get(model_name)
+        if route:
+            return self._required_provider(route)
+        candidates = []
+        if model_name in self.config.get("api_endpoints", {}):
+            candidates.append("custom")
+        for key, cfg in self.config.get("dynamic_providers", {}).items():
+            if model_name in cfg.get("models", []):
+                candidates.append(key)
+        if len(candidates) > 1:
+            raise ValueError("Conflicting model providers; select one with model_routes")
+        if candidates:
+            return self._required_provider(candidates[0])
+        if self.config.get("strict_model", True):
+            return self._resolve_strict(model_name)
         # Explicit custom endpoint wins before any heuristic (handles names like "glm-5:cloud")
         if model_name in self.config.get("api_endpoints", {}):
             return self.integrations.get("custom")
@@ -1208,27 +1303,64 @@ class ModelManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def send_prompt(self, prompt: str, model_name: str) -> str:
+    def _prepare_dispatch(self, prompt, model_name, system):
         intg = self._resolve(model_name)
-        if not intg:
-            return f"Error: No integration for '{model_name}'"
-        return intg.send_prompt(prompt, model_name)
+        if intg is None:
+            raise ValueError("No configured integration; select a provider with model_routes")
+        limit = self.config.get("model_specific_configurations", {}).get(model_name, {}).get("max_input_chars")
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+                raise ValueError("max_input_chars must be a positive integer")
+            if len(prompt) + len(system or "") > limit:
+                raise ValueError("Input exceeds configured max_input_chars; shorten it explicitly. Nothing was truncated or dispatched.")
+        provider = next(k for k, v in self.integrations.items() if v is intg)
+        dispatched = model_name
+        if isinstance(intg, AnthropicIntegration):
+            dispatched = intg._resolved(model_name)
+        elif isinstance(intg, OllamaCloudIntegration):
+            dispatched = intg._clean_name(model_name)
+        elif isinstance(intg, OllamaIntegration):
+            dispatched = model_name.replace("ollama/", "").replace("ollama:", "")
+        audit = {"requested_model": model_name, "requested_provider": self.config.get("model_routes", {}).get(model_name),
+                 "dispatched_provider": provider, "dispatched_model": dispatched}
+        logger.info("model_dispatch", extra={"model_audit": audit})
+        return intg, audit
+
+    def _audit_result(self, response, audit):
+        # Make a per-request copy: shared/fake responses must not leak metadata
+        # between simultaneous calls.
+        result = ModelResponse(
+            str(response), getattr(response, "reported_model", None),
+            getattr(response, "finish_reason", None),
+            outcome=getattr(response, "outcome", None), request_metadata=audit,
+            failure_kind=getattr(response, "failure_kind", None),
+        )
+        logger.info("model_result", extra={"model_audit": {
+            **audit, **response_details(result),
+            "is_error": result.startswith("Error:"),
+        }})
+        return result
+
+    def send_prompt(self, prompt: str, model_name: str) -> str:
+        return self.send_prompt_with_system(prompt, model_name)
 
     def send_prompt_with_system(
         self, prompt: str, model_name: str, system: Optional[str] = None
     ) -> str:
-        intg = self._resolve(model_name)
-        if not intg:
-            return f"Error: No integration for '{model_name}'"
-        return intg.send_prompt_with_system(prompt, model_name, system)
+        try:
+            intg, audit = self._prepare_dispatch(prompt, model_name, system)
+        except ValueError as e:
+            return f"Error: {e}"
+        return self._audit_result(intg.send_prompt_with_system(prompt, model_name, system), audit)
 
     async def send_prompt_async(
         self, prompt: str, model_name: str, system: Optional[str] = None
     ) -> str:
-        intg = self._resolve(model_name)
-        if not intg:
-            return f"Error: No integration for '{model_name}'"
-        return await intg.send_prompt_async(prompt, model_name, system)
+        try:
+            intg, audit = self._prepare_dispatch(prompt, model_name, system)
+        except ValueError as e:
+            return f"Error: {e}"
+        return self._audit_result(await intg.send_prompt_async(prompt, model_name, system), audit)
 
     def get_available_models(self) -> List[str]:
         """Static catalogue + live Ollama models.

@@ -1700,6 +1700,16 @@ async function probeModel(id) {
   } catch(e) { toast(e.message,'error'); }
 }
 
+function modelCallDiagnostics(r) {
+  const value = v => escHtml(String(v ?? 'unknown'));
+  return `<div style="font-size:11px;color:var(--muted);margin-top:6px;word-break:break-word">
+    Outcome: ${value(r.outcome)} · Evaluation: ${value(r.evaluation_status)} · Failure category: ${value(r.failure_kind)} · Stop reason: ${value(r.finish_reason)}<br>
+    Requested: ${value(r.requested_model ?? r.model)} · Dispatched: ${value(r.dispatched_provider)} / ${value(r.dispatched_model)}<br>
+    Provider-reported model: ${value(r.reported_model)}
+    ${r.reported_model_differs===true?'<br>Response model label differs. This may be a snapshot alias; it does not prove a model downgrade.':''}
+  </div>`;
+}
+
 async function testModel() {
   const model = document.getElementById('test-model-id').value.trim();
   const prompt = document.getElementById('test-prompt').value.trim();
@@ -1716,10 +1726,13 @@ async function testModel() {
           <span class="badge badge-muted">${r.latency_ms}ms</span>
         </div>
         <pre>${escHtml(r.response)}</pre>
+        ${modelCallDiagnostics(r)}
       </div>`;
     } else {
       el.innerHTML = `<div class="card" style="padding:12px;margin-top:8px;border-color:var(--red)">
-        <span class="badge badge-red">Error</span><span style="margin-left:8px;font-size:12px">${escHtml(r.error)}</span>
+        <span class="badge badge-red">${escHtml(r.outcome||'error')}</span><span style="margin-left:8px;font-size:12px">${escHtml(r.error||'Request did not complete.')}</span>
+        ${r.response?`<pre>${escHtml(r.response)}</pre>`:''}
+        ${modelCallDiagnostics(r)}
       </div>`;
     }
   } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
@@ -1962,7 +1975,7 @@ async function loadBypassesIntoChain() {
     (vl||[]).forEach(vr => {
       const vuln = (vr.vulnerability || '').toLowerCase().replace(/[^a-z0-9]/g,'');
       (vr.probes||[]).forEach(p => {
-        if (p.bypassed && p.prompt) {
+        if (isConfirmedProbe(p) && p.prompt) {
           bypassed.push({ ...p, _vuln: vuln });
           if (vuln) vulnCounts[vuln] = (vulnCounts[vuln] || 0) + 1;
         }
@@ -2753,7 +2766,55 @@ function updateInlineScanStatus(r) {
   if (r.errors && r.errors.length) el.style.color = 'var(--red, #f87171)';
 }
 
+function isConfirmedProbe(p) {
+  return p.validation_status === 'validated' &&
+    typeof p.validation_evaluator === 'string' && Boolean(p.validation_evaluator.trim()) &&
+    p.evaluation_status === 'evaluated' && !p.error && Boolean((p.response||'').trim()) &&
+    (!p.model_diagnostics?.outcome || p.model_diagnostics.outcome === 'completed') &&
+    !(p.response||'').includes('[blocked]') && !(p.response||'').includes('[incomplete]');
+}
+
+function modeResultLabel(m) {
+  if ((m.confirmed_bypasses||0)>0) return 'CONFIRMED';
+  if (m.evaluation_status==='not_evaluated') return 'NOT EVALUATED';
+  if ((m.heuristic_candidates ?? m.bypasses ?? 0)>0) return 'CANDIDATE (UNVERIFIED)';
+  return m.evaluation_status==='partial' ? 'PARTIAL' : 'NO CONFIRMED FINDING';
+}
+
+function normalizeScanResultEvidence(record) {
+  let confirmed = 0, candidates = 0;
+  const results = {}, modes = {};
+  for (const [model, values] of Object.entries(record.results||{})) {
+    results[model] = (Array.isArray(values)?values:[]).map(value=>{
+      const probes = (value.probes||[]).map(p=>({...p,
+        heuristic_positive: typeof p.heuristic_positive==='boolean' ? p.heuristic_positive : Boolean(p.bypassed),
+        bypassed: isConfirmedProbe(p)}));
+      for (const p of probes) {
+        if (!p.prompt) continue;
+        const mode = p.override_mode||'none';
+        const stats = modes[mode] ||= {mode, attempts:0, bypasses:0, confirmed_bypasses:0, heuristic_candidates:0, evaluated:0, not_evaluated:0};
+        stats.attempts++;
+        stats.bypasses += Number(p.bypassed);
+        stats.confirmed_bypasses += Number(p.bypassed);
+        stats.heuristic_candidates += Number(p.heuristic_positive);
+        stats[p.evaluation_status==='evaluated'?'evaluated':'not_evaluated']++;
+      }
+      const count = probes.filter(p=>p.bypassed).length;
+      const hints = probes.filter(p=>p.heuristic_positive).length;
+      confirmed += count;
+      candidates += hints;
+      return {...value, probes, bypass_count:count, confirmed_bypass_count:count,
+        heuristic_positive_count:hints, vulnerable:count>0,
+        bypass_rate:value.total_probes?count/value.total_probes:0};
+    });
+  }
+  const mode_stats = Object.values(modes).map(m=>({...m, rate:m.attempts?m.bypasses/m.attempts:0,
+    evaluation_status:!m.evaluated?'not_evaluated':m.not_evaluated?'partial':'evaluated'}));
+  return {...record, results, bypasses:confirmed, heuristic_candidates:candidates, mode_stats};
+}
+
 function renderScanResults(r, container, autoExpand=false) {
+  r = normalizeScanResultEvidence(r);
   const resultsObj = r.results || {};
   // Flatten {model: [vuln_result, ...]} → [{...vr, model}, ...]
   const mvList = Object.entries(resultsObj).flatMap(([model, vl]) =>
@@ -2792,7 +2853,8 @@ function renderScanResults(r, container, autoExpand=false) {
       <div id="${containerId}">
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:14px">
         <div class="stat-box"><div class="num">${r.total_probes||0}</div><div class="lbl">Total Probes</div></div>
-        <div class="stat-box"><div class="num text-${(r.bypasses||0)>0?'red':'green'}">${r.bypasses||0}</div><div class="lbl">Bypasses</div></div>
+        <div class="stat-box"><div class="num text-${(r.bypasses||0)>0?'red':'green'}">${r.bypasses||0}</div><div class="lbl">Confirmed findings</div></div>
+        <div class="stat-box"><div class="num">${r.heuristic_candidates||0}</div><div class="lbl">Heuristic candidates (unverified)</div></div>
         <div class="stat-box"><div class="num">${bypassRate}%</div><div class="lbl">Bypass Rate</div></div>
         <div class="stat-box"><div class="num text-red">${r.errors?.length||0}</div><div class="lbl">Errors</div></div>
       </div>
@@ -2817,12 +2879,13 @@ function renderScanResults(r, container, autoExpand=false) {
             const label = meta ? meta.label : m.mode;
             const pct = (m.rate*100).toFixed(0);
             const worked = m.bypasses > 0;
+            const resultLabel = modeResultLabel(m);
             return `<tr>
               <td><span class="badge badge-purple">${escHtml(m.mode)}</span> <span style="font-size:11px;color:var(--muted)">${escHtml(label)}</span></td>
               <td>${m.attempts}</td>
               <td>${m.bypasses}</td>
               <td><span class="badge ${worked?'badge-red':'badge-green'}">${pct}%</span></td>
-              <td><span style="font-size:11px;color:${worked?'var(--red)':'var(--green)'}">${worked?'WORKED':'failed'}</span></td>
+              <td><span style="font-size:11px;color:var(--muted)">${resultLabel}</span></td>
             </tr>`;}).join('')}
           </tbody>
         </table></div>
@@ -2845,7 +2908,7 @@ function renderScanResults(r, container, autoExpand=false) {
               const hasWrap = hasOverride && wrappedText;
               return `
               <div class="probe-row">
-                <span class="badge ${p.bypassed?'badge-red':p.error?'badge-orange':'badge-green'}" style="flex-shrink:0">${p.bypassed?'BYPASS':p.error?'ERROR':'SAFE'}</span>
+                <span class="badge ${p.bypassed?'badge-red':'badge-muted'}" style="flex-shrink:0">${p.bypassed?'CONFIRMED':p.error?'ERROR':p.evaluation_status!=='evaluated'?'NOT EVALUATED':p.heuristic_positive?'CANDIDATE':p.validation_status==='rejected'&&p.validation_evaluator?'NO FINDING':'UNVALIDATED'}</span>
                 <div style="flex:1;min-width:0">
                   ${(()=>{
                     const overrideMeta = hasOverride ? allOverrides.find(o=>o.mode===p.override_mode) : null;
@@ -2870,6 +2933,9 @@ function renderScanResults(r, container, autoExpand=false) {
                       ${hasOverride&&!sysPrompt?`<div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:4px">${escHtml(p.override_mode)} override applied (full prompt not stored — re-run to capture)</div>`:''}`;
                   })()}
                   ${p.response?`<div style="font-size:12px;background:var(--bg3);padding:6px 8px;border-radius:4px;margin-top:4px;word-break:break-all;white-space:pre-wrap">${escHtml(p.response||'')}</div>`:''}
+                  ${p.model_diagnostics&&Object.keys(p.model_diagnostics).length?modelCallDiagnostics(p.model_diagnostics):''}
+                  <div style="font-size:11px;color:var(--muted);margin-top:3px">Independent validation: ${escHtml(p.validation_status||'unvalidated')}${p.validation_evaluator?` (${escHtml(p.validation_evaluator)})`:''}. Heuristic flags alone do not confirm a finding.</div>
+                  ${p.response_truncated?`<div style="font-size:11px;color:var(--muted);margin-top:3px">Response preview shortened (${escHtml(String(Array.from(p.response||'').length))} of ${escHtml(String(p.response_full_length ?? 'unknown'))} characters). Use the server JSON export for the full stored response.</div>`:''}
                   ${p.error?`<div style="font-size:11px;color:var(--red);margin-top:3px">${escHtml(p.error)}</div>`:''}
                 </div>
                 <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0">
@@ -3456,7 +3522,9 @@ async function generateWithLLM() {
   try {
     const r = await POST('/api/synthetic/generate/llm', {vulnerability, base_prompt, model, count, complexity});
     el.innerHTML = `<div class="card">
-      <h3>LLM-generated variants <span class="badge badge-muted">${r.model_used}</span></h3>
+      <h3>Generated candidates <span class="badge badge-muted">${escHtml(r.generator||'unknown')}</span></h3>
+      <p class="text-muted">Requested model: ${escHtml(r.requested_model||'unknown')} · Provider-reported model: ${escHtml(r.model_used||'unknown')} · Not independently validated.</p>
+      ${r.warning?`<p class="text-muted">${escHtml(r.warning)}</p>`:''}
       ${(r.prompts||[]).map(p=>`
         <div style="padding:8px;background:var(--bg3);border-radius:4px;margin-bottom:6px;display:flex;gap:8px;align-items:flex-start">
           <code style="font-size:11px;flex:1;white-space:pre-wrap;word-break:break-all">${escHtml(p.prompt||'')}</code>
@@ -3500,7 +3568,7 @@ async function exportPrompts() {
   const el = document.getElementById('exp-result');
   try {
     const r = await POST('/api/synthetic/export', {prompts, model_key});
-    el.innerHTML = `<span class="badge badge-green">Added ${r.added} prompts to DB (key: ${r.model_key})</span>`;
+    el.innerHTML = `<span class="badge badge-muted">${escHtml(r.message||'Candidates staged without validation.')} (key: ${escHtml(r.model_key)})</span>`;
     toast(`Exported ${r.added} prompts`, 'success');
   } catch(e) { el.innerHTML = `<p class="text-red">${escHtml(e.message)}</p>`; }
 }
@@ -3624,12 +3692,13 @@ function renderReport(r, container) {
         <tbody>${r.mode_stats.map(m=>{
           const pct = (m.rate*100).toFixed(0);
           const worked = m.bypasses > 0;
+          const resultLabel = modeResultLabel(m);
           return `<tr>
             <td><span class="badge badge-purple">${escHtml(m.mode)}</span></td>
             <td>${m.attempts}</td>
             <td>${m.bypasses}</td>
             <td><span class="badge ${worked?'badge-red':'badge-green'}">${pct}%</span></td>
-            <td><span style="font-size:11px;color:${worked?'var(--red)':'var(--green)'}">${worked?'WORKED':'failed'}</span></td>
+            <td><span style="font-size:11px;color:var(--muted)">${resultLabel}</span></td>
           </tr>`;}).join('')}
         </tbody>
       </table></div>
@@ -4191,12 +4260,15 @@ async function testProviderLive() {
           <span class="badge badge-blue">${model}</span>
         </div>
         <pre style="font-size:12px">${escHtml(r.response)}</pre>
+        ${modelCallDiagnostics(r)}
       </div>`;
       toast(`${model} responded in ${r.latency_ms}ms`, 'success');
     } else {
       el.innerHTML = `<div class="card" style="padding:12px;border-color:var(--red)">
-        <span class="badge badge-red">Error</span>
+        <span class="badge badge-red">${escHtml(r.outcome||'error')}</span>
         <span style="font-size:12px;margin-left:8px">${escHtml(r.error||'unknown error')}</span>
+        ${r.response?`<pre>${escHtml(r.response)}</pre>`:''}
+        ${modelCallDiagnostics(r)}
       </div>`;
       toast(`${model}: ${r.error}`, 'error');
     }

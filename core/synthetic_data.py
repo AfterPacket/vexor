@@ -33,6 +33,29 @@ _engine  = PromptEngine()
 _overrides = OverrideEngine()
 
 
+class GenerationError(RuntimeError):
+    """Sanitized generation failure; never includes prompt or endpoint details."""
+
+
+class GenerationBatch(list):
+    """List-compatible candidates with truthful generator provenance."""
+
+    def __init__(self, items, *, requested_model, model_used=None,
+                 generator="llm", fallback_used=False, warning=None):
+        super().__init__(items)
+        self.requested_model = requested_model
+        self.model_used = model_used
+        self.generator = generator
+        self.fallback_used = fallback_used
+        self.warning = warning
+        for item in self:
+            item["validation_status"] = "unvalidated"
+            item["generator"] = generator
+            item["requested_model"] = requested_model
+            item["model_used"] = model_used
+            item["fallback_used"] = fallback_used
+
+
 # ── Complexity presets ────────────────────────────────────────────────────────
 
 # Each preset defines which techniques to apply at a given complexity tier.
@@ -270,6 +293,8 @@ class SyntheticDataGenerator:
                 "complexity":    complexity,
                 "techniques":    techniques,
                 "vulnerability": vulnerability,
+                "source": "rule_based",
+                "validation_status": "unvalidated",
             })
 
         return results[:count]
@@ -316,13 +341,11 @@ class SyntheticDataGenerator:
         count: int = 5,
         model: str = "llama3.1",
         complexity: int = 5,
-    ) -> List[Dict[str, Any]]:
-        """
-        Use a local Ollama model to generate novel prompt variants.
-        Falls back gracefully if Ollama is unavailable.
-        """
+        allow_rule_fallback: bool = False,
+    ) -> GenerationBatch:
+        """Generate unvalidated candidates; transport fallback requires consent."""
+        import requests
         try:
-            import requests
             system = (
                 "You are a red team researcher generating adversarial prompt variants. "
                 "Each variant should be semantically similar but phrased differently "
@@ -348,8 +371,11 @@ class SyntheticDataGenerator:
                 timeout=60,
             )
             resp.raise_for_status()
-            text = resp.json()["message"]["content"].strip()
+            payload = resp.json()
+            text = payload["message"]["content"].strip()
             lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 30][:count]
+            if not lines:
+                raise GenerationError("Generator returned no usable candidates; no fallback was used.")
             preset = COMPLEXITY_PRESETS[complexity]
             results = []
             for line in lines:
@@ -360,15 +386,29 @@ class SyntheticDataGenerator:
                     "complexity":    complexity,
                     "techniques":    techniques,
                     "vulnerability": vulnerability,
-                    "source":        f"llm_generated:{model}",
+                    "source":        f"llm_generated:{payload.get('model') or 'unreported'}",
                 })
-            return results
+            return GenerationBatch(results, requested_model=model,
+                                   model_used=payload.get("model"))
         except Exception as e:
-            # Graceful fallback: return rule-based variants
-            return self.generate(
-                vulnerability, complexity=complexity, count=count,
-                seed_prompts=[base_prompt]
-            )
+            # Never route around refusals, HTTP policy errors, quotas, or malformed output.
+            if allow_rule_fallback and isinstance(e, (requests.ConnectionError, requests.Timeout)):
+                items = self.generate(
+                    vulnerability, complexity=complexity, count=count,
+                    seed_prompts=[base_prompt]
+                )
+                for item in items:
+                    item["source"] = "rule_based"
+                return GenerationBatch(
+                    items, requested_model=model, generator="rule_based",
+                    fallback_used=True,
+                    warning="LLM transport unavailable; explicit rule-based fallback used. Candidates remain unvalidated.",
+                )
+            if isinstance(e, GenerationError):
+                raise
+            raise GenerationError(
+                f"LLM generation failed ({type(e).__name__}); no fallback was used."
+            ) from e
 
     def export_to_exploits(
         self,
@@ -401,6 +441,12 @@ class SyntheticDataGenerator:
                     "complexity":   item["complexity"],
                     "techniques":   item.get("techniques", []),
                     "success_rate": 0.0,
+                    # Client-submitted status cannot certify independent validation.
+                    "validation_status": "unvalidated",
+                    "generator": item.get("generator", "unknown"),
+                    "requested_model": item.get("requested_model"),
+                    "model_used": item.get("model_used"),
+                    "fallback_used": item.get("fallback_used", False),
                     "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 })
                 added += 1

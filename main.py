@@ -18,6 +18,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict
 
+APP_VERSION = "2.7.3"
+
 # Load .env from project root before anything else reads os.getenv()
 try:
     from dotenv import load_dotenv
@@ -97,12 +99,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[!] Background warmup failed: {e}")
 
-    # Schedule the warmup to run in background without blocking startup
-    asyncio.create_task(_background_warmup())
+    # Retain/cancel the background task: reloads and shutdown must not leave a
+    # model discovery thread/task attached to a dead application lifespan.
+    warmup_task = asyncio.create_task(_background_warmup(), name="vexor-background-warmup")
+    app.state.warmup_task = warmup_task
     print("[*] Vexor API ready (background warmup in progress)")
 
-    yield
-    print("[*] Vexor API — shutting down")
+    try:
+        yield
+    finally:
+        if not warmup_task.done():
+            warmup_task.cancel()
+            try:
+                await warmup_task
+            except asyncio.CancelledError:
+                pass
+        print("[*] Vexor API — shutting down")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -121,7 +133,7 @@ app = FastAPI(
         "- HTML / JSON report generation\n\n"
         "⚠️ *For authorized security testing only.*"
     ),
-    version="2.7.1",
+    version=APP_VERSION,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -197,7 +209,7 @@ async def api_info():
     """JSON summary of all available API endpoints."""
     return {
         "name":    "Vexor API",
-        "version": "2.7.1",
+        "version": APP_VERSION,
         "ui":      "http://localhost:8080/",
         "docs":    "/docs",
         "endpoints": {

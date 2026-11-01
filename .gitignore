@@ -25,6 +25,8 @@ exploits/*.json
 /test_runs/
 /results/
 /data/scans/
+/data/runs/
+/data/results/
 /reports/
 *.test.json
 *.test.log
@@ -38,6 +40,12 @@ scan_*.json
 .env.*
 !.env.example
 !.env.template
+# Local-only config overrides; keep shared/sample configs versioned.
+/configs/*local*
+/configs/*secret*
+/configs/*credential*
+/configs/*api_key*
+/configs/*apikey*
 *.key
 *.pem
 *.p12

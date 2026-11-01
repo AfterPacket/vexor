@@ -87,6 +87,9 @@ class TokenBucket:
     """
 
     def __init__(self, rpm: int):
+        if rpm <= 0:
+            raise ValueError("Rate limit RPM must be positive")
+        self._blocked_until = 0.0
         self.rpm            = rpm
         self._capacity      = float(rpm)
         self._tokens        = float(rpm)          # start full
@@ -103,24 +106,23 @@ class TokenBucket:
         )
         self._last_refill = now
 
-    async def acquire(self, retry_after: Optional[float] = None):
-        """
-        Block until a token is available (or retry_after seconds have passed).
-        Pass retry_after when a 429 response carried a Retry-After header.
-        """
-        if retry_after and retry_after > 0:
-            # Provider told us exactly how long to wait
-            await asyncio.sleep(retry_after)
+    def defer(self, retry_after: float):
+        """Apply provider-wide cooldown without acquiring a concurrency slot."""
+        if retry_after > 0:
+            self._blocked_until = max(self._blocked_until, time.monotonic() + retry_after)
 
+    async def acquire(self, retry_after: Optional[float] = None):
+        """Wait for both provider cooldown and a rate-limit token."""
+        if retry_after:
+            self.defer(retry_after)
         while True:
             async with self._lock:
                 self._refill()
-                if self._tokens >= 1.0:
+                cooldown = self._blocked_until - time.monotonic()
+                if cooldown <= 0 and self._tokens >= 1.0:
                     self._tokens -= 1.0
                     return
-                # Calculate exact wait time to next token
-                wait = (1.0 - self._tokens) / self._refill_rate
-
+                wait = max(cooldown, (1.0 - self._tokens) / self._refill_rate, 0)
             await asyncio.sleep(wait)
 
     @property
@@ -173,6 +175,10 @@ class RateLimiterRegistry:
         self._ensure(provider)
         await self._buckets[provider].acquire(retry_after=retry_after)
         await self._sems[provider].acquire()
+
+    def defer(self, provider: str, retry_after: float):
+        self._ensure(provider)
+        self._buckets[provider].defer(retry_after)
 
     def release(self, provider: str):
         """Release the concurrency slot (rate-limit token is consumed on acquire)."""

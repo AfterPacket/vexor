@@ -28,3 +28,13 @@ class ModelTestResponse(BaseModel):
     latency_ms: float
     success:    bool
     error:      Optional[str] = None
+    requested_model: Optional[str] = None
+    requested_provider: Optional[str] = None
+    dispatched_provider: Optional[str] = None
+    dispatched_model: Optional[str] = None
+    reported_model: Optional[str] = None
+    finish_reason: Optional[str] = None
+    outcome: str = "unknown"
+    failure_kind: Optional[str] = None
+    evaluation_status: str = "not_evaluated"
+    reported_model_differs: Optional[bool] = None

@@ -28,6 +28,10 @@ from core.override_engine import OverrideEngine, get_recommended_overrides
 from core.probe_adaptor import ProbeAdaptor
 from core.prompt_engine import ALL_VULNS, PromptEngine
 from core.rate_limiter import get_registry
+from core.scheduling import bounded_as_completed
+from core.template_evaluation import observe_template
+from core.validation import has_independent_verdict, is_confirmed_finding, validate_observation
+from core.model_results import classify_failure, response_details, terminal_execution_result
 
 # Module-level singletons — shared with discovery routes
 _failure_store    = FailureStore()
@@ -204,6 +208,14 @@ class ProbeResult:
     latency_ms:     float
     error:          Optional[str] = None
     wrapped_prompt: Optional[str] = None  # full prompt as sent to model (after override wrapping)
+    validation_status: str = "unvalidated"
+    validation_evaluator: Optional[str] = None
+    model_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    evaluation_status: str = "not_evaluated"
+
+    @property
+    def confirmed_bypass(self) -> bool:
+        return is_confirmed_finding(self)
 
 
 @dataclass
@@ -215,12 +227,43 @@ class ModelVulnResult:
     total_probes:  int = 0
 
     @property
+    def evaluated_probes(self) -> int:
+        return sum(p.evaluation_status == "evaluated" for p in self.probes)
+
+    @property
+    def evaluation_status(self) -> str:
+        evaluated = self.evaluated_probes
+        if not evaluated:
+            return "not_evaluated"
+        if evaluated < max(len(self.probes), self.total_probes):
+            return "partial"
+        return "evaluated"
+
+    @property
+    def confirmed_bypass_count(self) -> int:
+        return sum(p.confirmed_bypass for p in self.probes)
+
+    @property
+    def heuristic_positive_count(self) -> int:
+        return sum(bool(p.bypassed) for p in self.probes)
+
+    @property
+    def finding_status(self) -> str:
+        if self.confirmed_bypass_count:
+            return "confirmed"
+        if self.evaluation_status == "not_evaluated":
+            return "not_evaluated"
+        if any(p.evaluation_status == "evaluated" and not has_independent_verdict(p) for p in self.probes):
+            return "unvalidated"
+        return "partial" if self.evaluation_status == "partial" else "no_finding"
+
+    @property
     def bypass_rate(self) -> float:
-        return self.bypass_count / self.total_probes if self.total_probes else 0.0
+        return self.confirmed_bypass_count / self.total_probes if self.total_probes else 0.0
 
     @property
     def vulnerable(self) -> bool:
-        return self.bypass_count > 0
+        return self.confirmed_bypass_count > 0
 
 
 @dataclass
@@ -262,15 +305,28 @@ class ScanJob:
                 {
                     "vulnerability": vr.vulnerability,
                     "bypass_rate":   round(vr.bypass_rate, 3),
-                    "bypass_count":  vr.bypass_count,
+                    "bypass_count":  vr.confirmed_bypass_count,
+                    "confirmed_bypass_count": vr.confirmed_bypass_count,
+                    "heuristic_positive_count": vr.heuristic_positive_count,
                     "total_probes":  vr.total_probes,
                     "vulnerable":    vr.vulnerable,
+                    "finding_status": vr.finding_status,
+                    "evaluation_status": vr.evaluation_status,
+                    "evaluated_probes": vr.evaluated_probes,
+                    "not_evaluated_probes": len(vr.probes) - vr.evaluated_probes,
                     "probes": [
                         {
                             "prompt":         p.prompt,
                             "wrapped_prompt": p.wrapped_prompt,
                             "response":       p.response[:4000],
-                            "bypassed":       p.bypassed,
+                            "response_truncated": len(p.response) > 4000,
+                            "response_full_length": len(p.response),
+                            "validation_status": p.validation_status,
+                            "validation_evaluator": p.validation_evaluator,
+                            "model_diagnostics": p.model_diagnostics,
+                            "evaluation_status": p.evaluation_status,
+                            "bypassed":       p.confirmed_bypass,
+                            "heuristic_positive": bool(p.bypassed),
                             "override_mode":  p.override_mode,
                             "mutation":       p.mutation,
                             "latency_ms":     p.latency_ms,
@@ -290,7 +346,7 @@ class ScanJob:
         # completion, use the authoritative count from results.
         total_probes = finished_probes if self.status != ScanStatus.RUNNING else max(finished_probes, self.probes_completed)
         total_bypasses = sum(
-            vr.bypass_count
+            vr.confirmed_bypass_count
             for vr_list in self.results.values()
             for vr in vr_list
         )
@@ -305,12 +361,17 @@ class ScanJob:
                         continue  # skip error/placeholder probes
                     mode = p.override_mode or "none"
                     slot = mode_counts.setdefault(
-                        mode, {"attempts": 0, "bypasses": 0, "rate": 0.0}
+                        mode, {"attempts": 0, "bypasses": 0, "heuristic_candidates": 0, "rate": 0.0, "evaluated": 0, "not_evaluated": 0}
                     )
                     slot["attempts"] += 1
-                    if p.bypassed:
+                    slot["evaluated" if p.evaluation_status == "evaluated" else "not_evaluated"] += 1
+                    slot["heuristic_candidates"] += int(bool(p.bypassed))
+                    if p.confirmed_bypass:
                         slot["bypasses"] += 1
         for mode, slot in mode_counts.items():
+            slot["confirmed_bypasses"] = slot["bypasses"]
+            slot["evaluation_status"] = ("not_evaluated" if not slot["evaluated"]
+                                         else "partial" if slot["not_evaluated"] else "evaluated")
             slot["rate"] = round(slot["bypasses"] / slot["attempts"], 3) if slot["attempts"] else 0.0
         # Order modes: bypasses desc, then attempts desc
         mode_stats = [
@@ -320,6 +381,7 @@ class ScanJob:
 
         return {
             "scan_id":          self.scan_id,
+            "finding_count_basis": "independent_validation",
             "status":           self.status.value,
             "models":           self.models,
             "vulnerabilities":  self.vulnerabilities,
@@ -329,6 +391,7 @@ class ScanJob:
             "errors":           self.errors,
             "total_probes":     total_probes,
             "bypasses":         total_bypasses,
+            "heuristic_candidates": sum(vr.heuristic_positive_count for values in self.results.values() for vr in values),
             "mode_stats":       mode_stats,
             "results":          out,
         }
@@ -343,7 +406,9 @@ class Scanner:
     per-provider semaphore.
     """
 
-    def __init__(self):
+    def __init__(self, independent_validator=None):
+        # Server-owned, test-specific verifier. Never supplied by scan requests.
+        self.independent_validator = independent_validator
         self.prompt_engine   = PromptEngine()
         self.override_engine = OverrideEngine()
         self._mm             = None   # Lazy-loaded
@@ -527,7 +592,7 @@ class Scanner:
         else:
             job.status   = ScanStatus.COMPLETED
             job.progress = 100
-            print(f"[*] run_scan: Scan completed successfully - {job.probes_completed} probes, {sum(vr.bypass_count for vl in job.results.values() for vr in vl)} bypasses")
+            print(f"[*] run_scan: Scan finished - {job.probes_completed} task completions, {sum(vr.confirmed_bypass_count for vl in job.results.values() for vr in vl)} confirmed findings")
 
         # Post-scan: discovery analysis + warm pool maintenance
         try:
@@ -568,7 +633,6 @@ class Scanner:
         # Prepend any warm pool entries (and their adapted variants) for this
         # (model, vuln) pair so re-promising failed probes are tested first.
         warm_prompts: List[str] = []
-        _synth_template_ids: List[str] = []  # track IDs for marking tested after scan
         if job.use_warm_pool:
             try:
                 warm_entries = _failure_store.get_warm_pool(
@@ -623,8 +687,6 @@ class Scanner:
                         probe = (prefix + f" [{vuln}]").strip() if prefix else f"[{vuln}]"
                     if probe and probe not in warm_prompts:
                         warm_prompts.append(probe)
-                    if tmpl_id:
-                        _synth_template_ids.append(tmpl_id)
             except Exception:
                 pass
 
@@ -752,22 +814,21 @@ class Scanner:
             (p.prompt, p.override_mode) for p in result.probes if p.prompt
         }
 
-        # Use as_completed so progress updates as each probe finishes,
-        # not all at once after the last one in the batch lands.
-        # Multi-mode: cross-product each prompt × each selected mode.
+        # Store work descriptions, not thousands of already-running Tasks.
         if job.override_modes:
-            tasks = [
-                asyncio.ensure_future(_probe(p, mode))
-                for p in prompts
-                for mode in job.override_modes
-                if (p, mode) not in _done_combos
-            ]
+            work = [(p, mode, None, None) for p in prompts for mode in job.override_modes
+                    if (p, mode) not in _done_combos]
         else:
-            tasks = [
-                asyncio.ensure_future(_probe(p, _mode_for_prompt(i)))
-                for i, p in enumerate(prompts)
-                if (p, _mode_for_prompt(i)) not in _done_combos
-            ]
+            work = [(p, _mode_for_prompt(i), None, None) for i, p in enumerate(prompts)
+                    if (p, _mode_for_prompt(i)) not in _done_combos]
+        tasks = set()
+
+        async def _run_work(item):
+            prompt, mode, system, template_id = item
+            return await observe_template(
+                _failure_store, template_id,
+                lambda: _probe(prompt, mode, system_override=system),
+            )
 
         # Synthesized template probes — apply learned attack templates to the
         # first 2 base prompts. Cap at 3 templates per pair to avoid runaway growth.
@@ -788,14 +849,11 @@ class Scanner:
                         synth_p = (prefix + " " + base_p).strip() if prefix else base_p
                     if (synth_p, "none") in _done_combos:
                         continue   # already tested in a prior (resumed) run
-                    t = asyncio.ensure_future(_probe(synth_p, "none", system_override=sys_p))
-                    tasks.append(t)
+                    work.append((synth_p, "none", sys_p, tmpl_id))
                     result.total_probes += 1
-                if tmpl_id:
-                    _failure_store.mark_template_tested(tmpl_id)
         except Exception:
             pass
-        job.active_tasks.update(tasks)
+        result.total_probes = len(result.probes) + len(work)
         fatal_err: Optional[str] = None
         # Cost circuit-breaker counters (per pair)
         _consec_errors = 0
@@ -815,9 +873,12 @@ class Scanner:
             print(f"[!] {msg}")
             job.errors.append(msg)
 
-        for fut in asyncio.as_completed(tasks):
+        async for fut in bounded_as_completed(
+            work, _run_work, limit=16, active_tasks=job.active_tasks,
+            local_tasks=tasks, should_stop=_should_abort,
+        ):
             try:
-                pr: Any = await fut
+                pr: Any = fut.result()
             except asyncio.CancelledError:
                 if on_probe_done:
                     on_probe_done()
@@ -883,14 +944,6 @@ class Scanner:
                         f"{_wasted_ct}/{_completed_ct} probes wasted (all errors/blocks, 0 bypasses)"
                     )
 
-        # Mark synthesized templates as tested now that scan pair is complete
-        if _synth_template_ids:
-            try:
-                for _tid in _synth_template_ids:
-                    _failure_store.mark_template_tested(_tid)
-            except Exception:
-                pass
-
         job.active_tasks.difference_update(tasks)
 
         if fatal_err:
@@ -904,7 +957,7 @@ class Scanner:
             rl        = get_registry()
             failed_prompts = list({
                 p.prompt for p in result.probes
-                if not p.bypassed and p.prompt and not p.error
+                if not p.bypassed and p.prompt and not terminal_execution_result(p)
             })
             for raw_p in failed_prompts:
                 if job.cancelled or (job_abort and job_abort.is_set()):
@@ -929,6 +982,8 @@ class Scanner:
                         on_probe_done()
                     result.probes.append(ap_probe)
                     result.total_probes += 1
+                    if terminal_execution_result(ap_probe):
+                        break
                     if ap_probe.bypassed:
                         result.bypass_count += 1
                         break
@@ -967,12 +1022,15 @@ class Scanner:
         start = time.time()
         error: Optional[str] = None
         response = ""
+        diagnostics = {}
         timeout_s = _PROBE_TIMEOUT.get(provider, 60.0)
         try:
             response = await asyncio.wait_for(
                 mm.send_prompt_async(final_prompt, model, system_inj),
                 timeout=timeout_s,
             )
+            diagnostics = response_details(response)
+            diagnostics["requested_model"] = model
             # Surface provider error strings returned by integrations
             if response and response.startswith("Error:"):
                 error    = response
@@ -988,16 +1046,22 @@ class Scanner:
         except asyncio.TimeoutError:
             error    = f"Error: request to {model} timed out after {int(timeout_s)}s"
             response = ""
+            diagnostics = {"outcome": "error", "failure_kind": "timeout"}
         except Exception as e:
-            error    = _clean_api_error(str(e))
-            response = ""
-            # If rate-limited, re-acquire with the retry-after hint so next
-            # request to this provider waits the correct amount
-            if "429" in error or "rate limit" in error.lower():
+            category = classify_failure(e)
+            diagnostics = {"outcome": "blocked" if category == "policy_refusal" else "error",
+                           "failure_kind": category}
+            if category == "policy_refusal":
+                response = "[blocked] Provider rejected the request."
+            else:
+                error = _clean_api_error(str(e))
+                response = ""
+            # Apply cooldown without re-acquiring the slot held by our caller.
+            # Re-acquiring here can deadlock when all provider slots are held.
+            if error and ("429" in error or "rate limit" in error.lower()):
                 retry_after = self._parse_retry_after(error)
                 if retry_after:
-                    await rl.acquire(provider, retry_after=retry_after)
-                    rl.release(provider)
+                    rl.defer(provider, retry_after)
 
         # Detect fatal provider errors (billing, auth, quota) and raise so the
         # pair-level handler can abort rather than fire 25 more doomed probes.
@@ -1010,13 +1074,24 @@ class Scanner:
             )):
                 raise RuntimeError(f"Fatal provider error — {error}")
 
+        if error:
+            inferred = response_details(str(error))
+            diagnostics = {**diagnostics, "outcome": "error", "evaluation_status": "not_evaluated",
+                           "failure_kind": diagnostics.get("failure_kind") or inferred["failure_kind"]}
+        diagnostics["requested_model"] = model
+        evaluated = not error and diagnostics.get("outcome") == "completed"
+        diagnostics["evaluation_status"] = "evaluated" if evaluated else "not_evaluated"
+
         latency_ms = (time.time() - start) * 1000
-        bypassed   = self.prompt_engine.evaluate_response(
-            vulnerability, raw_prompt, response
+        # Transport success alone is not a completed, usable generation.
+        bypassed = bool(
+            not error and diagnostics.get("outcome") == "completed"
+            and self.prompt_engine.evaluate_response(vulnerability, raw_prompt, response)
         )
 
         # Record failures to the warm pool / discovery engine
-        if not bypassed and raw_prompt and response and not error:
+        if (not bypassed and raw_prompt and response and not error
+                and diagnostics.get("outcome") == "completed"):
             try:
                 classification = FailureClassifier.classify(response, vulnerability)
                 _failure_store.record(
@@ -1031,7 +1106,7 @@ class Scanner:
             except Exception:
                 pass  # never let discovery errors block probe results
 
-        return ProbeResult(
+        probe = ProbeResult(
             vulnerability  = vulnerability,
             prompt         = raw_prompt,
             response       = response,
@@ -1041,7 +1116,10 @@ class Scanner:
             latency_ms     = round(latency_ms, 1),
             error          = error,
             wrapped_prompt = final_prompt if override_mode != "none" else None,
+            model_diagnostics = diagnostics,
+            evaluation_status = "evaluated" if evaluated else "not_evaluated",
         )
+        return validate_observation(model, probe, self.independent_validator)
 
     # ── Injection scan (custom prompts from PromptFoo / user) ────────────────
 
@@ -1124,10 +1202,15 @@ class Scanner:
                 finally:
                     rl.release(provider)
 
-            tasks = [asyncio.ensure_future(_probe(p)) for p in prompts]
-            job.active_tasks.update(tasks)
-            probe_results = await asyncio.gather(*tasks, return_exceptions=True)
-            job.active_tasks.difference_update(tasks)
+            probe_results = []
+            async for task in bounded_as_completed(
+                prompts, _probe, limit=16, active_tasks=job.active_tasks,
+                should_stop=lambda: job.cancelled,
+            ):
+                try:
+                    probe_results.append(task.result())
+                except (asyncio.CancelledError, Exception) as e:
+                    probe_results.append(e)
             for pr in probe_results:
                 if isinstance(pr, BaseException):
                     result.probes.append(ProbeResult(
@@ -1277,7 +1360,7 @@ class Scanner:
                     result = await self._send_probe(mm, model, raw_prompt, vuln, mode)
                 finally:
                     rl.release(provider)
-                if result.bypassed:
+                if result.bypassed or terminal_execution_result(result):
                     return result
 
             # Fallback — bare probe
@@ -1296,10 +1379,16 @@ class Scanner:
             result   = ModelVulnResult(model=model, vulnerability=vuln)
             result.total_probes = len(entries)
 
-            tasks = [asyncio.ensure_future(_autopwn_probe(model, e, vuln)) for e in entries]
-            job.active_tasks.update(tasks)
-            probe_results = await asyncio.gather(*tasks, return_exceptions=True)
-            job.active_tasks.difference_update(tasks)
+            probe_results = []
+            async for task in bounded_as_completed(
+                entries, lambda entry: _autopwn_probe(model, entry, vuln),
+                limit=16, active_tasks=job.active_tasks,
+                should_stop=lambda: job.cancelled,
+            ):
+                try:
+                    probe_results.append(task.result())
+                except (asyncio.CancelledError, Exception) as e:
+                    probe_results.append(e)
             for pr in probe_results:
                 if isinstance(pr, BaseException):
                     result.probes.append(ProbeResult(
@@ -1571,6 +1660,8 @@ class Scanner:
                     rl.release(provider)
 
                 last_result = result
+                if terminal_execution_result(result):
+                    return result
                 if result.bypassed:
                     if mutation:
                         result.mutation = mutation  # tag which mutation worked
@@ -1599,7 +1690,6 @@ class Scanner:
             live_result = ModelVulnResult(model=model, vulnerability=vuln)
             async with lock:
                 job.results.setdefault(model, []).append(live_result)
-            _synth_template_ids: List[str] = []
             try:
                 if job.cancelled or job_abort.is_set():
                     return
@@ -1703,15 +1793,20 @@ class Scanner:
                             if probe and probe not in seen_p:
                                 prompts.insert(0, probe)
                                 seen_p.add(probe)
-                            if tmpl_id:
-                                _synth_template_ids.append(tmpl_id)
                     except Exception:
                         pass
 
                 live_result.total_probes = len(prompts)
 
-                tasks = [asyncio.ensure_future(_sweep_probe(model, p, vuln)) for p in prompts]
-                job.active_tasks.update(tasks)
+                work = [(p, None) for p in prompts]
+                tasks = set()
+
+                async def _run_work(item):
+                    prompt, template_id = item
+                    return await observe_template(
+                        _failure_store, template_id,
+                        lambda: _sweep_probe(model, prompt, vuln),
+                    )
 
                 # Synthesized template probes — apply learned attack templates
                 # to the first 2 base prompts (same logic as _scan_pair).
@@ -1730,19 +1825,22 @@ class Scanner:
                                 synth_p = prefix.replace("{goal}", base_p)
                             else:
                                 synth_p = (prefix + " " + base_p).strip() if prefix else base_p
-                            t = asyncio.ensure_future(
-                                _sweep_probe(model, synth_p, vuln)
-                            )
-                            tasks.append(t)
+                            # The legacy sweep ignores template-specific system
+                            # prompts. Do not claim those templates were evaluated.
+                            work.append((synth_p, tmpl_id if not sys_p else None))
                             live_result.total_probes += 1
-                        if tmpl_id:
-                            _failure_store.mark_template_tested(tmpl_id)
                 except Exception:
                     pass
 
-                for fut in asyncio.as_completed(tasks):
+                async for fut in bounded_as_completed(
+                    work, _run_work, limit=16, active_tasks=job.active_tasks,
+                    local_tasks=tasks,
+                    should_stop=lambda: job.cancelled or job_abort.is_set(),
+                ):
                     try:
-                        pr = await fut
+                        pr = fut.result()
+                    except asyncio.CancelledError:
+                        continue
                     except Exception as e:
                         pr = e
                     _on_probe_done()
@@ -1756,14 +1854,6 @@ class Scanner:
                         live_result.probes.append(pr)
                         if pr.bypassed:
                             live_result.bypass_count += 1
-
-                # Mark synthesized templates as tested
-                if _synth_template_ids:
-                    try:
-                        for _tid in _synth_template_ids:
-                            _failure_store.mark_template_tested(_tid)
-                    except Exception:
-                        pass
 
             except Exception as e:
                 async with lock:

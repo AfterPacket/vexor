@@ -26,6 +26,7 @@ from api.schemas.scan import (
     ScanRequest, ScanResponse, ScanStatusResponse,
 )
 from core.scanner import Scanner, ScanJob, ScanStatus, ModelVulnResult, ProbeResult
+from core.persistence import atomic_write_json
 
 router = APIRouter()
 _scanner = Scanner()
@@ -76,6 +77,21 @@ def _extract_chain_prompts(vulnerabilities: list) -> dict:
 
 SCAN_PERSIST_DIR = Path(__file__).parent.parent.parent / "data" / "scans"
 
+
+def _scan_file_path(scan_id: str) -> Path:
+    """Return the sole allowed persisted path for a UUID scan ID.
+
+    Route parameters are untrusted even though scan creation generates UUIDs.
+    Never join them into a filesystem path before validating the canonical form.
+    """
+    try:
+        canonical = str(uuid.UUID(str(scan_id)))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("Invalid scan identifier") from exc
+    if canonical != scan_id.lower():
+        raise ValueError("Invalid scan identifier")
+    return SCAN_PERSIST_DIR / f"{canonical}.json"
+
 def _scan_to_json(job: ScanJob) -> dict:
     """Serialise a ScanJob to a plain dict suitable for JSON storage."""
     results_serial: dict = {}
@@ -84,7 +100,10 @@ def _scan_to_json(job: ScanJob) -> dict:
             {
                 "model":         vr.model,
                 "vulnerability": vr.vulnerability,
-                "bypass_count":  vr.bypass_count,
+                "bypass_count":  vr.confirmed_bypass_count,
+                "confirmed_bypass_count": vr.confirmed_bypass_count,
+                "heuristic_positive_count": vr.heuristic_positive_count,
+                "finding_status": vr.finding_status,
                 "total_probes":  vr.total_probes,
                 "probes": [
                     {
@@ -92,11 +111,16 @@ def _scan_to_json(job: ScanJob) -> dict:
                         "prompt":         p.prompt,
                         "wrapped_prompt": p.wrapped_prompt,
                         "response":       p.response,
-                        "bypassed":       p.bypassed,
+                        "bypassed":       p.confirmed_bypass,
+                        "heuristic_positive": bool(p.bypassed),
                         "override_mode":  p.override_mode,
                         "mutation":       p.mutation,
                         "latency_ms":     p.latency_ms,
                         "error":          p.error,
+                        "validation_status": p.validation_status,
+                        "validation_evaluator": p.validation_evaluator,
+                        "model_diagnostics": p.model_diagnostics,
+                        "evaluation_status": p.evaluation_status,
                     }
                     for p in vr.probes
                 ],
@@ -105,6 +129,7 @@ def _scan_to_json(job: ScanJob) -> dict:
         ]
     return {
         "scan_id":           job.scan_id,
+        "finding_count_basis": "independent_validation",
         "status":            job.status.value,
         "models":            job.models,
         "vulnerabilities":   job.vulnerabilities,
@@ -135,15 +160,22 @@ def _json_to_scan(data: dict) -> ScanJob:
                     prompt         = p["prompt"],
                     wrapped_prompt = p.get("wrapped_prompt"),
                     response       = p["response"],
-                    bypassed       = p["bypassed"],
+                    # Preserve old flags as heuristic observations, not findings.
+                    bypassed       = p.get("heuristic_positive", p.get("bypassed", False)),
                     override_mode  = p["override_mode"],
                     mutation       = p.get("mutation"),
                     latency_ms     = p["latency_ms"],
                     error          = p.get("error"),
+                    validation_status = p.get("validation_status", "unvalidated"),
+                    validation_evaluator = p.get("validation_evaluator"),
+                    model_diagnostics = p.get("model_diagnostics", {}),
+                    evaluation_status = p.get("evaluation_status", "not_evaluated"),
                 )
                 for p in vr_data.get("probes", [])
             ]
-            bypass_count = vr_data.get("bypass_count", sum(1 for p in probes if p.bypassed))
+            # Legacy summary counters may be stale or keyword-derived. Runtime
+            # heuristics are reconstructed; public finding counts use evidence.
+            bypass_count = sum(bool(p.bypassed) for p in probes)
             total_probes = vr_data.get("total_probes", len(probes))
             mvr = ModelVulnResult(
                 model         = vr_data["model"],
@@ -175,14 +207,19 @@ def _json_to_scan(data: dict) -> ScanJob:
         probes_total_hint = data.get("probes_total_hint", 0),
     )
 
-def save_scan_to_disk(job: ScanJob) -> None:
-    """Persist a completed/failed ScanJob as JSON so it survives restarts."""
+def save_scan_to_disk(job: ScanJob) -> bool:
+    """Atomically checkpoint a scan; report failure without destroying old state."""
     try:
-        SCAN_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
-        path = SCAN_PERSIST_DIR / f"{job.scan_id}.json"
-        path.write_text(json.dumps(_scan_to_json(job), indent=2), encoding="utf-8")
+        path = _scan_file_path(job.scan_id)
+        atomic_write_json(path, _scan_to_json(job))
+        return True
     except Exception as exc:
-        print(f"[!] save_scan_to_disk failed for {job.scan_id}: {exc}")
+        warning = "Checkpoint could not be saved; completed work may not survive a restart."
+        if warning not in job.errors:
+            job.errors.append(warning)
+        # Exception text may contain filesystem paths or application data.
+        print(f"[!] save_scan_to_disk failed ({type(exc).__name__})")
+        return False
 
 
 def _reconcile_zombie(job: ScanJob) -> bool:
@@ -227,11 +264,11 @@ def load_all_scans_from_disk(store: dict) -> int:
             data = json.loads(path.read_text(encoding="utf-8"))
             job  = _json_to_scan(data)
             if _reconcile_zombie(job):
-                # rewrite the file so the zombie stays resolved on future restarts
-                try:
-                    path.write_text(json.dumps(_scan_to_json(job), indent=2), encoding="utf-8")
-                except Exception:
-                    pass
+                # Preserve atomic checkpoint semantics during zombie reconciliation.
+                save_scan_to_disk(job)
+            if path.stem != job.scan_id:
+                print(f"[!] Ignoring persisted scan {path.name}: filename/scan ID mismatch")
+                continue
             store[job.scan_id] = job
             loaded += 1
         except Exception as exc:
@@ -254,16 +291,18 @@ def _get_job(scan_id: str, store: dict) -> "ScanJob | None":
     job = store.get(scan_id)
     if job is not None:
         return job
-    path = SCAN_PERSIST_DIR / f"{scan_id}.json"
+    try:
+        path = _scan_file_path(scan_id)
+    except ValueError:
+        return None
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             job  = _json_to_scan(data)
+            if job.scan_id != scan_id:
+                return None
             if _reconcile_zombie(job):
-                try:
-                    path.write_text(json.dumps(_scan_to_json(job), indent=2), encoding="utf-8")
-                except Exception:
-                    pass
+                save_scan_to_disk(job)
             store[scan_id] = job  # cache back into memory
             return job
         except Exception:
@@ -514,7 +553,10 @@ async def delete_scan(scan_id: str, request: Request):
         raise HTTPException(status_code=404, detail=f"Scan {scan_id!r} not found")
     del store[scan_id]
     # Also remove the persisted file if it exists
-    persist_path = SCAN_PERSIST_DIR / f"{scan_id}.json"
+    try:
+        persist_path = _scan_file_path(scan_id)
+    except ValueError:
+        return
     if persist_path.exists():
         try:
             persist_path.unlink()

@@ -1,4 +1,4 @@
-# Vexor v2.7
+# Vexor v2.7.3
 
 **Offensive LLM security testing platform — OWASP GenAI Top 10**
 
@@ -23,6 +23,86 @@ Tests LLMs for prompt injection, system-prompt leakage, excessive agency, sensit
 > them as measured results.
 
 ---
+
+## What's New in v2.7.3 — Local Secret and Run-Data Protection
+
+> **Release scope:** v2.7.3 documents and tightens local Git-ignore protections and
+> updates the application/launcher version identifiers. It does not include a
+> provider/model upgrade or claim a live provider validation.
+
+| Area | Change |
+|---|---|
+| **Local configuration** | Ignore local config overrides named with `local`, `secret`, `credential`, or API-key markers under `configs/`; preserve shared sample configs. |
+| **Local run data** | Ignore scan, run, and result data folders plus generated local learning JSON and credential artifacts. |
+| **Secret-handling guidance** | Document staged-file review, tracked-file/history caveats, and key rotation after exposure. |
+| **Version identifiers** | Set `main.py`, `run_toolkit.bat`, and `run_toolkit.sh` to 2.7.3. |
+
+**Verification:** Python compilation passes. The offline unit suite currently has
+2 known failures in coverage reporting (`test_completed_benign_evaluation_retains_evaluated_status`
+and `test_mixed_coverage_is_partial_not_clean`); see the release audit notes.
+No paid/live provider scans were run.
+
+## What's New in v2.7.2 — Reliability and Local Startup
+
+> **Release scope:** v2.7.2 is a local reliability and reporting update. It was
+> verified with offline mocks only; it does not claim live provider compatibility,
+> model availability, or a change to provider safety enforcement.
+
+| Area | Change |
+|---|---|
+| **Windows startup** | `run_toolkit.bat` now validates `enum`, `venv`, and `ensurepip` before creating an environment; stops immediately on setup/install failures; and always runs pip/Uvicorn as `venv\\Scripts\\python.exe -m ...`. It no longer falls through to stale global launcher executables. |
+| **macOS/Linux startup** | `run_toolkit.sh` now has equivalent interpreter/venv validation and runs Uvicorn with the venv Python. |
+| **Broken Python guidance** | If standard-library imports fail, the launchers report that Python must be repaired/reinstalled or selected through `VEXOR_PYTHON`; they do not attempt to bootstrap from a partial embedded runtime. |
+| **Provider outcomes** | Refusals, output limits, empty output, timeouts, rate limits, unavailable models, quotas, authentication, and unsupported capabilities have distinct local result categories. A blocked request is `not_evaluated`, not clean or successful. |
+| **Fallback behavior** | Policy refusals and other terminal error outcomes stop automatic same-test mode/baseline sequences. Retries remain bounded and do not dispatch to another provider. |
+| **Evidence and discovery** | Checkpoints retain model diagnostics/evaluation state. Unevaluated results are excluded from template/discovery completion bookkeeping. Generated candidates remain unvalidated until explicit evaluation. |
+| **Scheduling** | Probe scheduling is bounded per pair and cancellation drains owned tasks. The mocked benchmark documents request multiplication in AutoPwn-style flows without making live performance claims. |
+| **Application shutdown** | The background warmup task is retained and cancelled during FastAPI lifespan shutdown/reload. |
+
+### Windows repair / first run
+
+The error `ModuleNotFoundError: No module named 'enum'` means the Python selected
+by Windows is incomplete or damaged; it is not a Vexor dependency error. Repair
+or reinstall a complete supported Python from [python.org](https://www.python.org/downloads/),
+then open a new Command Prompt and run:
+
+```bat
+cd C:\Users\jorda\OneDrive\Documents\vexor-main\vexor-main
+run_toolkit.bat
+```
+
+If a good interpreter is installed but not selected by `PATH`, choose it for the
+current Command Prompt only:
+
+```bat
+set "VEXOR_PYTHON=C:\Path\To\python.exe"
+run_toolkit.bat --no-reload
+```
+
+The chosen interpreter must be Python 3.10+ with `enum`, `venv`, and `ensurepip`.
+Do not use a copied/embedded Python runtime lacking those standard-library modules.
+`--no-install` only skips package installation; it will fail safely if the venv
+lacks FastAPI or Uvicorn. Use `--no-reload` for long-running scans.
+
+After the launcher has created `venv`, the server can also be started directly:
+
+```powershell
+.\venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8080
+```
+
+This direct command uses the same project environment but does not create a venv,
+install packages, check Ollama, or open the browser automatically.
+
+### Local verification
+
+```bat
+venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
+```
+
+See `docs/RELEASE_2.7.3_AUDIT.md` for this release's scope and verification;
+`docs/RELEASE_2.7.2_AUDIT.md` for the prior startup incident and rollback notes;
+`docs/RELIABILITY_AUDIT.md` for reliability evidence; and
+`docs/FALLBACK_REVIEW.md` for the offline fallback-handling matrix.
 
 ## What's New in v2.7
 
@@ -313,15 +393,15 @@ with `override=True` (always wins over stale system environment variables):
 
 ```bash
 cp .env.example .env
-# edit .env — no leading spaces, no # prefix on active keys
+# edit .env — uncomment only real keys; no leading spaces
 ```
 
 ```ini
-# .env
-OPENAI_API_KEY=***
-ANTHROPIC_API_KEY=***
-GOOGLE_API_KEY=***
-GROQ_API_KEY=***
+# .env — include only providers with real configured credentials
+OPENAI_API_KEY=your_real_key
+# ANTHROPIC_API_KEY=your_real_key
+# GOOGLE_API_KEY=your_real_key
+# GROQ_API_KEY=your_real_key
 ```
 
 Or set environment variables directly:
@@ -348,7 +428,7 @@ Or set keys in `configs/model_config.json` (see file for schema).
 
 > **Common key issues:**
 > - Leading spaces in `.env` values prevent loading (`ANTHROPIC_API_KEY=*** not ` ANTHROPIC_API_KEY=***
-> - Lines prefixed with `#` are comments and are ignored
+> - Lines prefixed with `#` are comments and are ignored. Keep unused provider lines commented; `.env` has precedence over existing environment variables.
 > - Billing/quota errors are now surfaced immediately in the scan UI rather than hanging
 
 ### Ollama (local models)
@@ -1478,4 +1558,6 @@ If Vexor reveals a significant safety or security weakness in a production model
 
 ### API Key & Data Safety
 
-Scan results are stored locally in `data/scans/`. Ensure `data/`, `.env`, and any config files containing keys are excluded from version control before pushing forks or sharing your environment. Do not expose the Vexor web UI on a public network interface without adding authentication.
+Scan results are stored locally in `data/scans/`. The repository `.gitignore` excludes `.env` files (except checked-in examples), credentials and key files, local config overrides under `configs/` whose names contain `local`, `secret`, `credential`, or `api_key`/`apikey`, scan/run/result directories, generated learning JSON under `exploits/`, and other local outputs. Shared sample configs such as `configs/default.json` and `configs/model_config.json` remain eligible for version control; never put live credentials in those shared files.
+
+Ignore rules do **not** untrack files already committed, and do not remove a secret from existing Git history. Before committing, inspect staged filenames and diffs (`git diff --cached --name-only` and `git diff --cached`), and verify that no credentials, private config, prompts, model responses, or real scan data are included. If a key was committed or disclosed, revoke/rotate it immediately; removing it from the current file is not sufficient. Do not expose the Vexor web UI on a public network interface without adding authentication.

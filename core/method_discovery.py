@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from core.failure_classifier import DefenseType, FailureClass
 from core.failure_store import FailureStore
+from core.validation import is_confirmed_finding
 
 
 # ── MethodSignature ───────────────────────────────────────────────────────────
@@ -240,16 +241,20 @@ class MethodDiscoveryEngine:
         for model, vr_list in job.results.items():
             for vr in vr_list:
                 for pr in vr.probes:
+                    if (pr.error or not pr.response
+                            or getattr(pr, "evaluation_status", "not_evaluated") != "evaluated"):
+                        continue
                     entry = {
                         "model":         model,
                         "vulnerability": pr.vulnerability,
                         "prompt":        pr.prompt,
                         "response":      pr.response,
                         "mode":          pr.override_mode,
-                        "bypassed":      pr.bypassed,
+                        "bypassed":      is_confirmed_finding(pr),
+                        "heuristic_positive": pr.bypassed,
                     }
                     all_probes.append(entry)
-                    if pr.bypassed:
+                    if entry["bypassed"]:
                         successes.append(entry)
                     else:
                         failures_by_model.setdefault(model, []).append(entry)
@@ -570,7 +575,10 @@ class MethodDiscoveryEngine:
             probe_map: Dict[str, Dict[str, int]] = {}
             for vr in vr_list:
                 for pr in vr.probes:
-                    if pr.bypassed:
+                    if (pr.error or not pr.response
+                            or getattr(pr, "evaluation_status", "not_evaluated") != "evaluated"):
+                        continue
+                    if is_confirmed_finding(pr):
                         s = 3
                     else:
                         cr = FailureClassifier.classify(pr.response, pr.vulnerability)

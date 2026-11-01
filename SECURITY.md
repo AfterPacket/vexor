@@ -60,4 +60,4 @@ Vexor stores scan results locally in `data/scans/` and reads API keys from envir
 
 - Ensure `.env`, `data/`, and `configs/model_config.json` (if it contains keys) are in `.gitignore`
 - Rotate any API keys that may have been committed or exposed
-- Do not expose the Vexor web server (`localhost:7860`) on a public interface without adding authentication
+- Do not expose the Vexor web server (`http://127.0.0.1:8080`) on a public interface. The bundled application has no authentication, authorization, TLS termination, or multi-user isolation; use a separately reviewed reverse proxy and access-control layer if a network deployment is required.

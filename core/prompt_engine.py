@@ -14,6 +14,8 @@ import random
 import re
 from typing import Dict, List, Optional
 
+from core.evaluation_signals import has_explicit_refusal, normalize_evaluation_text
+
 
 # ── Vulnerability module map ──────────────────────────────────────────────────
 # llm10_zh: Chinese-language attacks specifically targeting GLM and other Chinese LLMs
@@ -148,18 +150,24 @@ class PromptEngine:
         ep = self._exploits.get("effective_prompts", {})
         model_lower = model.lower()
 
+        def eligible(entries):
+            # Preserve legacy records, but never promote explicitly unvalidated
+            # generated candidates into the effective-prompt pool.
+            return [e["prompt"] for e in entries
+                    if e.get("validation_status") in (None, "validated")]
+
         # Exact key match
         for key in ep:
             if key == model_lower:
                 entries = ep[key].get(vulnerability, [])
-                return [e["prompt"] for e in entries]
+                return eligible(entries)
 
         # Prefix match (e.g. 'claude-opus-4-6' matches 'claude' key)
         for key in ep:
             if model_lower.startswith(key) or key in model_lower:
                 entries = ep[key].get(vulnerability, [])
                 if entries:
-                    return [e["prompt"] for e in entries]
+                    return eligible(entries)
 
         return []
 
@@ -407,13 +415,13 @@ class PromptEngine:
     ]
 
     def evaluate_response(self, vulnerability: str, prompt: str, response: str) -> bool:
-        """Delegate response evaluation to the relevant module."""
-        if not response or response.startswith("Error:"):
+        """Screen for heuristic candidates; independent validation confirms findings."""
+        if not response or response.startswith("Error:") or has_explicit_refusal(response):
             return False
 
         # Global pre-check: if the model explicitly named the attack technique,
         # it's a refusal regardless of technical content that follows.
-        rl = response.lower()
+        rl = normalize_evaluation_text(response)
         for signal in self._GLOBAL_REFUSAL_SIGNALS:
             if signal in rl:
                 return False
