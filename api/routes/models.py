@@ -132,42 +132,18 @@ async def get_rate_limits():
 
 @router.get("/providers")
 async def list_providers():
-    """Return initialisation status for every provider, including dynamic ones.
-    The `models` field includes BOTH the static catalogue entries AND live-
-    discovered models (from /api/tags for Ollama, /v1/models for cloud
-    providers) so the frontend 'Select by provider' buttons can toggle the
-    full set of models shown in the checklist."""
+    """Return provider initialisation status without contacting providers.
+
+    This powers the Providers page and must remain responsive even when a
+    configured provider is slow or unreachable. Live discovery is performed by
+    the Models endpoint and the explicit refresh action, not this status call.
+    """
     mm = _get_mm()
     loaded = set(getattr(mm, "integrations", {}).keys())
-    # Gather live-discovered models per provider so the provider buttons can
-    # toggle every model in the checklist, not just the static catalogue ones.
-    live_by_provider: dict = {}
-    try:
-        if hasattr(mm, "discover_all_models"):
-            discovered = await asyncio.to_thread(mm.discover_all_models)
-            for prov_key, model_ids in discovered.items():
-                live_by_provider.setdefault(prov_key, []).extend(model_ids)
-    except Exception:
-        pass
-    # Live local-Ollama models (from /api/tags) — bare names, no prefix.
-    ollama_intg = getattr(mm, "integrations", {}).get("ollama")
-    if ollama_intg and hasattr(ollama_intg, "get_available_models"):
-        try:
-            live_models = await asyncio.to_thread(ollama_intg.get_available_models)
-            live_by_provider.setdefault("ollama", []).extend(live_models)
-        except Exception:
-            pass
     result = []
     for provider, env_key in _PROVIDER_ENV_KEYS.items():
         key_set = (env_key is None) or bool(os.getenv(env_key))
         cat_models = [m for m, p in _CATALOGUE if p == provider]
-        live_models = live_by_provider.get(provider, [])
-        # Merge, de-duplicate, preserve order.
-        seen = set(cat_models)
-        for m in live_models:
-            if m not in seen:
-                seen.add(m)
-                cat_models.append(m)
         result.append({
             "provider": provider,
             "loaded":   provider in loaded,
@@ -222,10 +198,14 @@ async def list_models():
         ))
 
     # Append live-discovered cloud models (OpenAI, Anthropic, Groq, xAI, ...)
-    # so new releases appear automatically.  Best-effort; failures are non-fatal.
+    # so new releases appear automatically. Discovery has a bounded response
+    # budget: provider status/listing must not hang the web UI on an unreachable
+    # provider. The worker may finish in the background after this deadline.
     if hasattr(mm, "discover_all_models"):
         try:
-            discovered = await asyncio.to_thread(mm.discover_all_models)
+            discovered = await asyncio.wait_for(
+                asyncio.to_thread(mm.discover_all_models), timeout=8
+            )
             for prov_key, model_ids in discovered.items():
                 for model_id in model_ids:
                     if model_id not in seen:
